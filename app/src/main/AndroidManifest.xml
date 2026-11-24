@@ -67,6 +67,10 @@
             android:screenOrientation="landscape" />
 
         <activity
+            android:name="com.sampmobile.launcher.GamedataActivity"
+            android:screenOrientation="landscape" />
+
+        <activity
             android:name="com.sampmobile.launcher.SplashActivity"
             android:exported="true"
             android:screenOrientation="landscape">
