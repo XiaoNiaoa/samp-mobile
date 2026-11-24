@@ -113,6 +113,11 @@ private:
     ikcpcb* kcp_ = nullptr;
 
     std::mutex handlerMutex_;
+
+    // 保护 sessionKeys_ / hasSessionKeys_：网络线程在收包解密、游戏线程在
+    // SendPacket 加密，而 CleanupTransport 会 memset 清零。没有这把锁时
+    // 断线瞬间可能读到半清零的密钥（解出垃圾或崩）。
+    mutable std::mutex keysMutex_;
     PacketHandler packetHandler_;
     SessionHandler sessionHandler_;
 };

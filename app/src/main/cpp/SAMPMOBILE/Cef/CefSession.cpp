@@ -1,5 +1,6 @@
 #include "CefSession.h"
 
+#include "CefBrowser.h"
 #include "CefResources.h"
 
 #include <android/log.h>
@@ -91,6 +92,12 @@ void CefSession::OnNetworkPacket(const cefproto::NetworkPacket& packet)
 void CefSession::OnSessionActive(bool active)
 {
     LOGI("[CefSession] session %s", active ? "active" : "inactive");
+
+    // Handshake succeeded: the peer really speaks the CEF protocol, so it is
+    // only now worth paying for a Chromium instance.普通（非 CEF）服务器
+    // 永远不会走到这里，因此不会再白拉一个隐藏 WebView。
+    if (active)
+        CefBrowser::NotifyTransportConnected();
 }
 
 void CefSession::DrainPacketQueue()

@@ -65,6 +65,14 @@ public:
     // were attached with AttachCurrentThread.
     static void OnJniLoad(JNIEnv* env);
 
+    // Called from the network thread once the handshake succeeded: the peer is
+    // a real CEF server, so it is now worth starting Chromium. No-op if JNI
+    // was not initialised or the callback is missing.
+    static void NotifyTransportConnected();
+
+    /** 调试自检事件是否开启（环境变量 SAMP_CEF_DEBUG_WORLDOBJ=1）。 */
+    static bool worldObjectDebugEnabled();
+
     // Idempotent: installs itself as CefSession's event handlers.
     void Install();
 
@@ -284,7 +292,9 @@ private:
     static jstring NewJavaString(JNIEnv* env, const std::string& utf8);
 
 private:
+    static JavaVM* javaVm_;
     static jclass javaClass_;
+    static jmethodID midTransportConnected_;
     static jmethodID midCreate_;
     static jmethodID midDestroy_;
     static jmethodID midSetVisible_;

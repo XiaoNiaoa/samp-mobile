@@ -52,6 +52,9 @@ public final class CefManager {
     public static final int CREATE_ERROR_ID_IN_USE = 2;
 
     private static final Object LOCK = new Object();
+
+    /** 预热只做一次；握手成功后才置 true。 */
+    private static boolean sWarmUpStarted = false;
     private static final SparseArray<CefWebView> sBrowsers = new SparseArray<>();
     private static final List<Runnable> sPending = new ArrayList<>();
 
@@ -103,6 +106,27 @@ public final class CefManager {
 
         registerDebugReceiver(activity, main);
         installImeWatcher(activity);
+        // 不在这里预热：普通（非 CEF）服务器根本不需要 Chromium，
+        // 无条件拉一个隐藏 WebView 会让所有玩家白付内存与启动时间。
+        // 等握手成功、确认是 CEF 服后再预热，见 onTransportConnected()。
+    }
+
+    /**
+     * 握手成功（确认对端是 CEF 服务器）后调用，此时才值得起 Chromium。
+     *
+     * 由 C++ 侧在 CefNetwork 进入 Connected 时回调。幂等：重复调用无副作用。
+     */
+    public static void onTransportConnected() {
+        final Activity activity;
+        final Handler main;
+        synchronized (LOCK) {
+            if (sWarmUpStarted) return;
+            sWarmUpStarted = true;
+            activity = sActivity.get();
+            main = sMain;
+        }
+        if (activity == null || main == null) return;
+        Log.i(TAG, "transport connected -> warming up WebView");
         warmUp(activity, main);
     }
 

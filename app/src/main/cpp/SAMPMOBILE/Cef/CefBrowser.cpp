@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "CefBrowser.h"
 
 #include "CefJson.h"
@@ -35,7 +36,9 @@ extern Game* pGame;
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  CEFB_LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, CEFB_LOG_TAG, __VA_ARGS__)
 
+JavaVM* CefBrowser::javaVm_ = nullptr;
 jclass CefBrowser::javaClass_ = nullptr;
+jmethodID CefBrowser::midTransportConnected_ = nullptr;
 jmethodID CefBrowser::midCreate_ = nullptr;
 jmethodID CefBrowser::midDestroy_ = nullptr;
 jmethodID CefBrowser::midSetVisible_ = nullptr;
@@ -103,6 +106,9 @@ void CefBrowser::OnJniLoad(JNIEnv* env)
     if (!env)
         return;
 
+    if (!javaVm_)
+        env->GetJavaVM(&javaVm_);
+
     // CefManager lives in the app class loader; JNI_OnLoad runs on a thread
     // that has it, so this is the only safe place to resolve the class.
     jclass local = env->FindClass("com/sampmobile/game/ui/cef/CefManager");
@@ -121,6 +127,8 @@ void CefBrowser::OnJniLoad(JNIEnv* env)
         return;
     }
 
+    midTransportConnected_ = env->GetStaticMethodID(javaClass_, "onTransportConnected", "()V");
+    ClearJniException(env, "GetStaticMethodID(onTransportConnected)");
     midCreate_ = env->GetStaticMethodID(javaClass_, "createBrowser", "(ILjava/lang/String;ZZ)V");
     ClearJniException(env, "GetStaticMethodID(createBrowser)");
     midDestroy_ = env->GetStaticMethodID(javaClass_, "destroyBrowser", "(I)V");
@@ -538,6 +546,27 @@ void CefBrowser::FlushPendingCreates()
          queued.size());
     for (const auto& event : queued)
         HandleServerEvent(event);
+}
+
+void CefBrowser::NotifyTransportConnected()
+{
+    if (!javaVm_ || !javaClass_ || !midTransportConnected_)
+        return;
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (javaVm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK)
+    {
+        if (javaVm_->AttachCurrentThread(&env, nullptr) != JNI_OK || !env)
+            return;
+        attached = true;
+    }
+
+    env->CallStaticVoidMethod(javaClass_, midTransportConnected_);
+    ClearJniException(env, "onTransportConnected");
+
+    if (attached)
+        javaVm_->DetachCurrentThread();
 }
 
 void CefBrowser::Install()
@@ -1032,8 +1061,22 @@ CefBrowser::WorldObjectEntry* CefBrowser::FindWorldObject(int32_t id)
     return nullptr;
 }
 
+bool CefBrowser::worldObjectDebugEnabled()
+{
+    // 默认关闭。这些是排查用的自检事件（stage 1..8 + 每 3 秒心跳），
+    // 正式服上每 3 秒往服务端刷一条日志没有任何好处，还可能被反作弊
+    // 当成异常行为。需要时把环境变量 SAMP_CEF_DEBUG_WORLDOBJ 置 1 打开。
+    static const bool enabled = [] {
+        const char* v = getenv("SAMP_CEF_DEBUG_WORLDOBJ");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+
 void CefBrowser::SendWorldObjectDebug(int32_t browserId, int32_t objectId, int32_t stage)
 {
+    if (!worldObjectDebugEnabled())
+        return;
     auto& network = CefSession::Get().Network();
     if (network.GetState() != CefNetwork::State::Connected)
         return;
@@ -1047,6 +1090,8 @@ void CefBrowser::SendWorldObjectDebug(int32_t browserId, int32_t objectId, int32
 void CefBrowser::SendWorldObjectPerf(int32_t browserId, int32_t framesPerWindow,
                                      int32_t costMs, int32_t windowMs)
 {
+    if (!worldObjectDebugEnabled())
+        return;
     auto& network = CefSession::Get().Network();
     if (network.GetState() != CefNetwork::State::Connected)
         return;
@@ -1237,7 +1282,16 @@ bool CefBrowser::ApplyWorldObjectAttach(int32_t browserId, int32_t objectId)
 
     // 复用 SA-MP 的自定义材质通道：ChangeCustomMaterialObjectCB 会把这个
     // 纹理赋给 atomic 的第 i 个 material，render 结束后再恢复。
-    obj->m_Material[0].pMaterialTexture = static_cast<RwTexture*>(entry->rwTexture);
+    //
+    // 引用计数是这里的关键：CObject::~CObject() 对每个非空材质槽都会
+    // RwTextureDestroy(pMaterialTexture)。如果不抬 refCount，服务端 DestroyObject
+    // 或流送卸载一旦先销毁物体，我们的 rwTexture/rwRaster 就被连带释放，
+    // 下一帧上传会锁已释放的 raster（堆破坏），Detach 时还会二次销毁。
+    // 抬高之后物体析构只把计数减回 1，由我们自己在 RemoveWorldObject 里销毁。
+    auto* texture = static_cast<RwTexture*>(entry->rwTexture);
+    if (texture->refCount < 2)
+        texture->refCount = 2;
+    obj->m_Material[0].pMaterialTexture = texture;
     obj->m_bHasCustomObjectMaterial = true;
 
     entry->target = obj;
@@ -1258,13 +1312,21 @@ void CefBrowser::DetachBrowserFromObject(int32_t browserId, int32_t objectId)
         return;
 
     auto* obj = static_cast<CObject*>(entry->target);
-    if (obj)
+    // 只有目标物体仍在池里、且确实是同一个对象时才去动它的材质。
+    // 物体可能已经被 DestroyObject 回收，此时 obj 是悬空指针，碰一下就崩。
+    if (obj && FindPooledObject(objectId) == obj)
     {
         // 顺序很重要：ChangeToOriginalObjectMaterial 只在标志为真时才恢复，
         // 所以先恢复、再摘掉我们的纹理、最后清标志。
         obj->ChangeToOriginalObjectMaterial();
         if (obj->m_Material[0].pMaterialTexture == entry->rwTexture)
+        {
             obj->m_Material[0].pMaterialTexture = nullptr;
+            // 把挂载时抬高的引用还回去，之后由 RemoveWorldObject 统一销毁。
+            auto* texture = static_cast<RwTexture*>(entry->rwTexture);
+            if (texture && texture->refCount > 1)
+                texture->refCount = 1;
+        }
         obj->m_bHasCustomObjectMaterial = false;
     }
 
@@ -1394,8 +1456,25 @@ void CefBrowser::TickWorldObject3D()
     {
         std::lock_guard<std::recursive_mutex> lock(worldObjectMutex_);
         for (auto& e : worldObjects_)
-            if (e.attached && e.rwTexture && e.nextDueMs <= nowMs)
-                due.emplace_back(e.nextDueMs, e.browserId);
+        {
+            if (!e.attached || !e.rwTexture || e.nextDueMs > nowMs)
+                continue;
+
+            // 目标物体可能已被服务端 DestroyObject、流送卸载或因断线回收。
+            // 池里已经不是同一个指针了，就说明我们挂的那个对象没了：
+            // 此时 entry->rwRaster 可能已失效，绝不能再 RwRasterLock 它。
+            // 直接摘掉挂载，等 Java 侧下一轮重新发起 attach。
+            if (e.target && FindPooledObject(e.objectId) != e.target)
+            {
+                e.target = nullptr;
+                e.attached = false;
+                LOGW("[CefBrowser] world object %d: target object %d gone, detached",
+                     e.browserId, e.objectId);
+                continue;
+            }
+
+            due.emplace_back(e.nextDueMs, e.browserId);
+        }
     }
     if (due.empty())
         return;

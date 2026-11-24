@@ -63,6 +63,23 @@ void CefNetwork::Connect(int32_t playerId)
         return;
     }
 
+    // 上一轮 ThreadMain 可能自行退出（DNS 解析失败 / udp connect 失败 / 被服务端断开），
+    // 那种情况下 state_ 已回 Disconnected 但 networkThread_ 仍然 joinable。
+    // 直接给它赋新线程会触发 std::terminate() 闪退（断网、坏域名、纯 IPv6 环境必现）。
+    // 所以先回收旧线程。
+    if (networkThread_.joinable())
+    {
+        stopRequested_.store(true, std::memory_order_release);
+        if (networkThread_.get_id() == std::this_thread::get_id())
+        {
+            networkThread_.detach();
+        }
+        else
+        {
+            networkThread_.join();
+        }
+    }
+
     playerId_ = playerId;
     joinAttempts_ = 0;
     stopRequested_.store(false, std::memory_order_release);
@@ -130,9 +147,12 @@ void CefNetwork::CleanupTransport()
         socketFd_ = -1;
     }
 
-    std::memset(&clientKeys_, 0, sizeof(clientKeys_));
-    std::memset(&sessionKeys_, 0, sizeof(sessionKeys_));
-    hasSessionKeys_ = false;
+    {
+        std::lock_guard<std::mutex> lock(keysMutex_);
+        std::memset(&clientKeys_, 0, sizeof(clientKeys_));
+        std::memset(&sessionKeys_, 0, sizeof(sessionKeys_));
+        hasSessionKeys_ = false;
+    }
     joinAttempts_ = 0;
     playerId_ = -1;
 }
@@ -155,6 +175,7 @@ void CefNetwork::ThreadMain()
         {
             LOGE("[CefNet] cannot resolve %s", host_.c_str());
             state_.store(State::Disconnected, std::memory_order_release);
+            CleanupTransport();
             return;
         }
         serverAddr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
@@ -167,6 +188,7 @@ void CefNetwork::ThreadMain()
     {
         LOGE("[CefNet] udp connect() failed: %s", strerror(errno));
         state_.store(State::Disconnected, std::memory_order_release);
+        CleanupTransport();
         return;
     }
 
@@ -199,6 +221,10 @@ void CefNetwork::ThreadMain()
         if (state_.load(std::memory_order_acquire) == State::Disconnected)
             break;
     }
+
+    // 线程正常退出（被 Disconnect 或被服务端断开）：收尾自己的资源。
+    // 早退路径（DNS/connect 失败）在 return 前也走这里，避免 socket 泄漏。
+    CleanupTransport();
 }
 
 void CefNetwork::DoSendRequestJoin()
@@ -253,8 +279,13 @@ void CefNetwork::HandleRawMessage(const uint8_t* data, size_t size)
     {
         for (const auto& msg : kcpMessages)
         {
+            uint8_t rxKey[cefcrypto::SESSION_KEY_BYTES]{};
+            {
+                std::lock_guard<std::mutex> lock(keysMutex_);
+                std::memcpy(rxKey, sessionKeys_.rx, sizeof(rxKey));
+            }
             std::vector<uint8_t> decrypted =
-                cefcrypto::DecryptPacket(msg.data(), msg.size(), sessionKeys_.rx);
+                cefcrypto::DecryptPacket(msg.data(), msg.size(), rxKey);
             if (decrypted.empty())
             {
                 LOGW("[CefNet] failed to decrypt KCP message");
@@ -393,7 +424,12 @@ void CefNetwork::SendPacket(const cefproto::NetworkPacket& packet)
             return;
         }
 
-        std::vector<uint8_t> encrypted = cefcrypto::EncryptPacket(raw.data(), raw.size(), sessionKeys_.tx);
+        uint8_t txKey[cefcrypto::SESSION_KEY_BYTES]{};
+        {
+            std::lock_guard<std::mutex> lock(keysMutex_);
+            std::memcpy(txKey, sessionKeys_.tx, sizeof(txKey));
+        }
+        std::vector<uint8_t> encrypted = cefcrypto::EncryptPacket(raw.data(), raw.size(), txKey);
         if (encrypted.empty())
         {
             LOGE("[CefNet] failed to encrypt packet");
