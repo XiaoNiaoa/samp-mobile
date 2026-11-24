@@ -32,7 +32,9 @@ HTTP_PORT=8000
 LOG="$SRV/log.txt"
 
 # 启动器里的固定坐标（2388x1080 横屏，见 README 的截图）
-TAP_ROW1="884 186"          # 收藏夹第一行（测试服务器）
+# 收藏夹首行：表头「N 个服务器」固定占 190-227，首行文字块 276-357，中心 y≈316。
+# 之前写 186 会打在表头上，点了等于没点，白等 120s。
+TAP_ROW1="800 316"          # 收藏夹第一行（测试服务器）
 TAP_ENTER_PANEL="2020 948"  # 右侧详情面板底部的「进入服务器」
 TAP_ENTER_DIALOG="1333 820" # 昵称/版本确认弹窗里的「进入服务器」
 
@@ -48,6 +50,10 @@ adbq devices | grep -q "device$" || fail "没有连接的 adb 设备"
 [ -f "$SRV/components/Cef.dll" ]              || fail "缺 $SRV/components/Cef.dll（官方 release 里的组件）"
 [ -f "$SRV/gamemodes/cef_e2e.amx" ]           || fail "缺 $SRV/gamemodes/cef_e2e.amx（先跑 gamemodes 下的 pawncc）"
 [ -f "$WWW/index.html" ]                      || fail "缺 $WWW/index.html"
+# gamemode 必须是 cef_e2e：跑成 login_demo 之类的话服务端一条 [e2e] 行都不会打，
+# 下面是全部断言一起红，看起来像客户端问题，其实只是配置没切。
+grep -q '"cef_e2e"' "$SRV/config.json" 2>/dev/null \
+    || fail "config.json 的 pawn.main_scripts 不是 cef_e2e（当前配置跑的是别的 gamemode）"
 echo "  组件: $(grep -m1 -ao 'Cef Component ([0-9.]*)' "$SRV/log.txt" 2>/dev/null || echo '（启动后见日志）')"
 echo "  服务端目录: $SRV"
 
@@ -69,7 +75,12 @@ sleep 2
 
 if ! curl -sS -m 3 -o /dev/null "http://127.0.0.1:$HTTP_PORT/index.html" 2>/dev/null; then
     echo "  启动测试页 HTTP 服务 :$HTTP_PORT"
-    ( cd "$WWW" && cmd //c "start /b python -m http.server $HTTP_PORT --bind 0.0.0.0" >/dev/null 2>&1 )
+    # 必须起成独立进程。原来用 cmd /b 起，脚本一退出（或被 Ctrl-C / kill 掉）python
+    # 就被回收，客户端后面看到的全是 CEF 的「网页无法打开」错误页 —— 而断言只会
+    # 报 "没等到 PAGE -> SERVER"，看起来像客户端不 emit，其实是页面根本没加载。
+    powershell -NoProfile -Command \
+        "Start-Process -FilePath 'python' -ArgumentList '-m','http.server','$HTTP_PORT','--bind','0.0.0.0' -WorkingDirectory '$(cygpath -w "$WWW")' -WindowStyle Hidden" \
+        >/dev/null 2>&1
     for _ in $(seq 1 20); do
         curl -sS -m 2 -o /dev/null "http://127.0.0.1:$HTTP_PORT/index.html" 2>/dev/null && break
         sleep 0.5
@@ -77,6 +88,14 @@ if ! curl -sS -m 3 -o /dev/null "http://127.0.0.1:$HTTP_PORT/index.html" 2>/dev/
 fi
 curl -sS -m 3 -o /dev/null -w "  测试页 HTTP %{http_code}\n" "http://127.0.0.1:$HTTP_PORT/index.html" \
     || fail "测试页起不来"
+
+# 再从手机侧确认一次：本机 curl 通不代表手机连得上（防火墙 Public profile / AP 隔离）。
+# 连不上时只告警 —— 让流程继续，好在日志里留下「页面加载失败」的真实原因。
+if adbq shell "toybox nc -w 3 $HOST_IP $HTTP_PORT </dev/null" >/dev/null 2>&1; then
+    echo "  手机 -> $HOST_IP:$HTTP_PORT 可达"
+else
+    echo "  [warn] 手机侧连不上 $HOST_IP:$HTTP_PORT，页面会显示「网页无法打开」（PAGE -> SERVER 必挂）"
+fi
 
 # 入站放行（需要管理员；失败只告警，不中断）
 netsh advfirewall firewall add rule name="omp-cef-e2e-udp" dir=in action=allow \
@@ -119,6 +138,10 @@ adbq push "$(cygpath -w "$OUT/servers-e2e.json")" \
 
 adbq shell am force-stop "$PKG"
 sleep 2
+# WorldObject3D 的 stage 事件默认关（正式服不该刷这类日志），验收要看 c=1/c=2 就得先开。
+# 客户端读的是 debug.samp.cef.worldobj 系统属性，不是环境变量 —— 安卓上没法给应用
+# 进程注入 env，用 getenv 等于永久关着。
+adbq shell setprop debug.samp.cef.worldobj 1
 adbq shell am start -n "$PKG/.SplashActivity" >/dev/null 2>&1
 sleep 14
 adbq exec-out screencap -p > "$OUT/e2e-1-list.png"
@@ -228,6 +251,8 @@ slice | grep -E "\[e2e\]|RequestJoin" | sed 's/^/    /'
 echo
 echo "  日志: $LOG"
 echo "  截图: $OUT/e2e-1-list.png  e2e-2-ingame.png  e2e-3-world3d.png  e2e-4-world2d.png"
+# 验收完把调试开关关回去，别把设备留在「刷调试事件」的状态。
+adbq shell setprop debug.samp.cef.worldobj 0 >/dev/null 2>&1 || true
 if [ $FAILED -eq 0 ] && [ $WAIT_OK -eq 1 ]; then
     echo
     echo "=== E2E (REAL PLUGIN) OK"
