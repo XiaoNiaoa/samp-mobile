@@ -26,6 +26,7 @@ extern NetGame* pNetGame;
 extern Game* pGame;
 
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1096,12 +1097,21 @@ bool CefBrowser::worldObjectDebugEnabled()
 {
     // 默认关闭。这些是排查用的自检事件（stage 1..8 + 每 3 秒心跳），
     // 正式服上每 3 秒往服务端刷一条日志没有任何好处，还可能被反作弊
-    // 当成异常行为。需要时把环境变量 SAMP_CEF_DEBUG_WORLDOBJ 置 1 打开。
-    static const bool enabled = [] {
-        const char* v = getenv("SAMP_CEF_DEBUG_WORLDOBJ");
-        return v && v[0] == '1';
-    }();
-    return enabled;
+    // 当成异常行为。
+    //
+    // 打开方式：
+    //   adb shell setprop debug.samp.cef.worldobj 1   <- 真机 / 自动化验收走这条
+    //   进程环境变量 SAMP_CEF_DEBUG_WORLDOBJ=1        <- 桌面 / CI 走这条
+    //
+    // 不能用 static 缓存：adb setprop 是随时下发的，缓存了就得重启进程才生效，
+    // 而 E2E 脚本恰恰是「装好 APK 之后再打开开关」。读 prop 是一次共享内存读，
+    // 每条调试事件读一次的代价可以忽略。
+    char prop[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.samp.cef.worldobj", prop) > 0 && prop[0] == '1')
+        return true;
+
+    const char* env = getenv("SAMP_CEF_DEBUG_WORLDOBJ");
+    return env && env[0] == '1';
 }
 
 void CefBrowser::SendWorldObjectDebug(int32_t browserId, int32_t objectId, int32_t stage)
