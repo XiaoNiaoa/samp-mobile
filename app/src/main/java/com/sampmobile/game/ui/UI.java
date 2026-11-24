@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.Objects;
 
 import com.sampmobile.game.SAMP;
+import com.sampmobile.game.ui.cef.CefManager;
 import com.sampmobile.game.ui.widgets.ButtonPanel;
 import com.sampmobile.game.ui.widgets.Chat;
 import com.sampmobile.game.ui.widgets.Dialog;
@@ -127,6 +128,9 @@ public class UI implements ButtonPanel.Listener, Voice.Listener, Dialog.Listener
         if (visible && samp != null) {
             samp.cancelAllNativeTouches();
         }
+        // 游戏聊天输入开/关 -> omp-cef：本地事件发给每个页面，同时上行
+        // ClientEmitEvent(ChatInputState)，对应 PC ChatHook::SetChatInputState。
+        CefManager.onGameChatStateChanged(visible);
     }
 
     @Override
@@ -251,6 +255,12 @@ public class UI implements ButtonPanel.Listener, Voice.Listener, Dialog.Listener
 
     public void showKeyboard(boolean z) {
         Log.i(TAG, "**** showKeyboard " + z);
+        // 页面输入框正拿着键盘且该浏览器 controlsChat=true 时，游戏聊天框让位
+        // （PC ChatHook::Hook_OpenChatInput -> FocusManager::ShouldBlockChat）。
+        if (z && CefManager.shouldBlockChat()) {
+            Log.i(TAG, "**** showKeyboard blocked - focused CEF page owns chat input");
+            return;
+        }
         samp.runOnUiThread(() -> keyboard.show(z));
     }
 
