@@ -209,6 +209,13 @@ public class SplashActivity extends AppCompatActivity implements GLSurfaceView.R
     private void startMain() {
         if (!isFinishing()) {
             try {
+                // 数据未就绪且配置了分发地址时，先去下载页。已就绪则直接进启动器，
+                // 不打断老玩家。
+                if (needsGamedata()) {
+                    startActivity(new Intent(SplashActivity.this, GamedataActivity.class));
+                    finish();
+                    return;
+                }
                 Intent intent = new Intent(SplashActivity.this, MainActivity.class);
                 intent.putExtra("extra_check", "sampmobile1337");
                 startActivity(intent);
@@ -216,6 +223,18 @@ public class SplashActivity extends AppCompatActivity implements GLSurfaceView.R
             } catch (Exception e) {
                 e.printStackTrace();
             }
+        }
+    }
+
+    /** 数据缺失且有下载地址时返回 true。没配地址就按现状直接进主界面。 */
+    private boolean needsGamedata() {
+        String url = BuildConfig.GAMEDATA_MANIFEST_URL;
+        if (url == null || url.isEmpty()) return false;
+        try {
+            return !com.sampmobile.launcher.download.GamedataState.isReady(this);
+        } catch (Throwable t) {
+            Log.w("SplashActivity", "检查数据完整性失败，按已就绪处理: " + t);
+            return false;
         }
     }
 

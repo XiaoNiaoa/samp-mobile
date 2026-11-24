@@ -40,6 +40,12 @@ android {
             // jniLibs/armeabi-v7a/libGTASA.so（官方 2.10 的 ABI split APK）。
             abiFilters.add("arm64-v8a")
         }
+
+        // 游戏数据包清单地址。可在 gradle.properties 覆盖：
+        //   SAMP_GAMEDATA_MANIFEST=https://cdn.example.com/manifest.json
+        def manifestUrl = (localProps.getProperty("SAMP_GAMEDATA_MANIFEST")
+                ?: System.getenv("SAMP_GAMEDATA_MANIFEST") ?: "")
+        buildConfigField "String", "GAMEDATA_MANIFEST_URL", "\"${manifestUrl}\""
     }
 
     paranoid {
