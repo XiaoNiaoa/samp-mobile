@@ -137,11 +137,22 @@ public final class GamedataInstallerTask {
                 return;
             }
 
-            // 已安装且版本一致 → 不重复下载
+            // 版本一致 → 不重复下载
             String installed = installedVersion();
             if (installed != null && installed.equals(manifest.version) && installer.isInstalled()) {
                 l.onStage(Stage.READY);
                 l.onStatus("数据已是最新（" + manifest.version + "）");
+                l.onDone(false);
+                return;
+            }
+
+            // 没有版本记录但核心文件齐全：玩家自己导入过（GameDataImporter 或 adb push）。
+            // 这些人的数据是好的，不该只为"登记一下版本"就重下 1GB+。
+            // 只补写一条记录，让后续能参与版本更新，不再打断。
+            if (installed == null && installer.isInstalled()) {
+                writeState(manifest.version);
+                l.onStage(Stage.READY);
+                l.onStatus("已检测到本地数据，无需下载");
                 l.onDone(false);
                 return;
             }

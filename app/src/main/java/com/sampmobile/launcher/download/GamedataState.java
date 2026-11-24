@@ -52,9 +52,29 @@ public final class GamedataState {
 
     /** 数据是否就绪（可以被游戏直接使用）。 */
     public static boolean isReady(Context context) {
-        if (installedVersion(context) == null) return false;
         File root = context.getExternalFilesDir(null);
-        return GameDataImporter.isGameDataReady(root);
+
+        // 核心文件齐全就是可用 —— 不管这些文件是本下载器装的、还是玩家用
+        // GameDataImporter 手动导入的、还是 adb push 进去的。
+        // 早期实现要求必须有 installed.json，导致已经手动放好数据的老玩家
+        // 一配上下载地址就被强制重下 1GB+，这是错的。
+        if (GameDataImporter.isGameDataReady(root)) return true;
+
+        // 核心文件不全时，如果下载器曾经成功装过一次（有版本记录），
+        // 说明是后续被破坏（例如用户从文件管理器删了文件），需要重下。
+        // 没有记录也没有文件，是首次启动。
+        return false;
+    }
+
+    /**
+     * 数据是否由本下载器安装（有版本记录）。
+     *
+     * 与 {@link #isReady} 的区别：这个用于"要不要检查新版本"，
+     * isReady 用于"能不能直接进游戏"。手动导入的老玩家前者为 false、
+     * 后者为 true —— 可以正常玩，只是不会自动追更新。
+     */
+    public static boolean isManagedByDownloader(Context context) {
+        return installedVersion(context) != null;
     }
 
     /** 缺哪些核心文件（空表示齐全），用于给玩家更具体的提示。 */

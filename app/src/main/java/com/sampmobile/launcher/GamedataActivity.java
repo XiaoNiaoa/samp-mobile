@@ -101,8 +101,12 @@ public class GamedataActivity extends AppCompatActivity
 
     private void cancelDownload() {
         if (task != null) task.cancel();
-        setStatus(getString(R.string.gamedata_cancelled), false);
-        actionButton.setText(R.string.gamedata_retry);
+        // 工作线程要跑到下一个检查点才会真的退出（可能还在读网络）。
+        // 这里只把按钮置灰，等 onError/onDone 回调里再恢复成「重试」，
+        // 否则 running 仍为 true 时界面已经显示可重试，点了会静默无效。
+        actionButton.setEnabled(false);
+        actionButton.setText(R.string.gamedata_cancelled);
+        setStatus("正在取消…", false);
     }
 
     // ------------------------------------------------------- Listener（后台线程）
@@ -137,11 +141,23 @@ public class GamedataActivity extends AppCompatActivity
         });
     }
 
+    /** 进度更新至少间隔 200ms；2GB 数据每 64KB 回调一次，不节流会 post 三万次。 */
+    private static final long PROGRESS_THROTTLE_MS = 200;
+    private long lastProgressPostMs = 0;
+
     @Override
     public void onProgress(long bytesDone, long bytesTotal) {
+        final long now = System.currentTimeMillis();
+        final int perMille = bytesTotal > 0
+                ? (int) Math.min(1000, bytesDone * 1000 / bytesTotal)
+                : 0;
+        // 100% 与首次必然刷新，其余按节流窗口丢弃
+        final boolean force = perMille >= 1000 || lastProgressPostMs == 0;
+        if (!force && now - lastProgressPostMs < PROGRESS_THROTTLE_MS) return;
+        lastProgressPostMs = now;
+
         main.post(() -> {
             if (bytesTotal <= 0) return;
-            int perMille = (int) Math.min(1000, bytesDone * 1000 / bytesTotal);
             progressBar.setProgress(perMille);
             percentText.setText(String.format(Locale.US, "%d%%", perMille / 10));
             subtitleText.setText(String.format(Locale.US, "%s / %s",
@@ -159,6 +175,7 @@ public class GamedataActivity extends AppCompatActivity
     @Override
     public void onError(String message, Throwable cause) {
         running.set(false);
+        lastProgressPostMs = 0;
         main.post(() -> {
             setStatus(message, true);
             actionButton.setEnabled(true);
@@ -177,7 +194,10 @@ public class GamedataActivity extends AppCompatActivity
             actionButton.setText(R.string.gamedata_enter);
             actionButton.setEnabled(true);
             actionButton.setOnClickListener(v -> {
-                startActivity(new Intent(this, MainActivity.class));
+                // MainActivity 有 extra_check 校验（防外部拉起），漏传会立刻 finish。
+                Intent intent = new Intent(this, MainActivity.class);
+                intent.putExtra("extra_check", "sampmobile1337");
+                startActivity(intent);
                 finish();
             });
         });

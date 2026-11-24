@@ -84,19 +84,17 @@ public final class ChunkDownloader {
 
         final int count = pkg.chunks.size();
 
-        // 先扫一遍已完成的片，把进度起点算出来，避免进度条从 0 跳。
-        final AtomicLong done = new AtomicLong(0);
+        // 清掉长度不符的 .chunk（把半个文件当成品会让拼装直接失败），
+        // 然后按磁盘现状报一次初始进度，避免进度条从 0 跳。
         for (DataManifest.Chunk c : pkg.chunks) {
             File finalized = chunkFile(dir, c, true);
-            if (finalized.isFile() && finalized.length() == c.bytes) {
-                done.addAndGet(c.bytes);
-            } else {
-                // 长度对不上就当作没下过，避免把半个文件当成品。
-                if (finalized.isFile() && !finalized.delete()) {
+            if (finalized.isFile() && finalized.length() != c.bytes) {
+                if (!finalized.delete()) {
                     Log.w(TAG, "无法删除长度不符的分片 " + finalized);
                 }
             }
         }
+        final AtomicLong done = new AtomicLong(completedBytes(dir, pkg));
         listener.onProgress(done.get(), pkg.bytes);
 
         // 逐片顺序下载。并发留给上层多个包并行（game 与 online 可同时下），
@@ -114,11 +112,39 @@ public final class ChunkDownloader {
             if (!ok) {
                 throw new IOException("分片 " + c.index + " 下载失败（已重试 " + MAX_ATTEMPTS + " 次）");
             }
+            // 一片落定后按磁盘现状重算，作为下一片的进度基数。
+            // 只增不减也无法出错：completedBytes 只统计真正到位的字节。
+            done.set(completedBytes(dir, pkg));
+            listener.onProgress(done.get(), pkg.bytes);
             listener.onChunkDone(c.index, count);
         }
 
         if (cancelled.get()) throw new InterruptedException("已取消");
         return true;
+    }
+
+    /**
+     * 已完成字节数 = 已转正的 .chunk 长度之和 + 当前 .part 的长度。
+     *
+     * 不用累加式计数器：哈希失败重下、服务器忽略 Range 重来、续传起点
+     * 来自上次运行的文件……这些情况下"加了多少就减多少"很难保持平衡，
+     * 一旦减多进度就变负、减少了进度就虚高。按磁盘现状重算永远是对的，
+     * 代价只是每片扫一次目录（片数最多几百）。
+     */
+    private static long completedBytes(File dir, DataManifest.Package pkg) {
+        long total = 0;
+        for (DataManifest.Chunk c : pkg.chunks) {
+            File finalized = chunkFile(dir, c, true);
+            if (finalized.isFile() && finalized.length() == c.bytes) {
+                total += c.bytes;
+                continue;
+            }
+            File part = chunkFile(dir, c, false);
+            if (part.isFile() && part.length() > 0) {
+                total += Math.min(part.length(), c.bytes);
+            }
+        }
+        return total;
     }
 
     private boolean downloadChunk(String baseUrl, File dir, DataManifest.Chunk c,
@@ -140,15 +166,14 @@ public final class ChunkDownloader {
                         if (!part.renameTo(finalized)) {
                             throw new IOException("重命名分片失败：" + part);
                         }
-                        done.addAndGet(c.bytes);
-                        listener.onProgress(done.get(), totalBytes);
                         return true;
                     }
                     // 大小对但哈希不对：删掉整片重来，不能续传（内容已损坏）。
+                    // 注意不能减 done —— 这片只有在校验通过转正时才 addAndGet，
+                    // 此处从未计入，做减法会让进度变成负数。
                     if (!part.delete()) {
                         throw new IOException("无法删除损坏分片：" + part);
                     }
-                    done.addAndGet(-c.bytes);
                     existing = 0;
                 }
 
@@ -219,8 +244,9 @@ public final class ChunkDownloader {
 
             boolean serverHonouredRange = (code == HttpURLConnection.HTTP_PARTIAL);
             if (skip > 0 && !serverHonouredRange) {
-                // 服务器不支持 Range：必须从头写，先把旧内容清掉并回退进度。
-                done.addAndGet(-skip);
+                // 服务器不支持 Range：必须从头写，先把旧内容清掉。
+                // skip 是 part 的既有长度，来源可能是上次运行留下的文件，
+                // 并不一定计入过本轮的 done，减它会让进度变成负数。
                 if (!target.delete() && target.exists()) {
                     throw new IOException("无法重置分片：" + target);
                 }
@@ -231,14 +257,16 @@ public final class ChunkDownloader {
                  FileOutputStream out = new FileOutputStream(target, skip > 0)) {
 
                 byte[] buf = new byte[64 * 1024];
+                // done 记的是"已转正分片"的字节；当前片按实际写入量叠加，
+                // 这样无论续传起点来自哪里、失败重试几次，进度都不会错。
+                final long base = done.get();
                 long written = skip;
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     if (cancelled.get()) throw new InterruptedException("已取消");
                     out.write(buf, 0, n);
                     written += n;
-                    done.addAndGet(n);
-                    listener.onProgress(done.get(), totalBytes);
+                    listener.onProgress(base + written, totalBytes);
                     if (written > expected) {
                         // 远端比清单声明的还长：数据不对，别继续写。
                         throw new IOException("分片超出预期长度 " + expected);

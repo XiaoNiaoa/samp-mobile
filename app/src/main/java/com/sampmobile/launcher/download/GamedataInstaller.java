@@ -198,16 +198,39 @@ public final class GamedataInstaller {
                     Log.i(TAG, "保留用户文件，不覆盖：" + rel);
                     continue;
                 }
-                // 覆盖同名文件；先删再拷，避免 renameTo 跨文件系统失败
+                // 覆盖同名文件；先删掉旧的
                 if (dst.exists() && !dst.delete()) {
                     throw new IOException("无法覆盖已有文件：" + dst);
                 }
-                java.nio.file.Files.copy(src.toPath(), dst.toPath(),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+                // 优先 renameTo：staging 与 files/ 在同一文件系统内，改名是零拷贝，
+                // 1GB+ 数据不需要额外一份空间，也没有逐字节 I/O。
+                // 只有跨文件系统（理论上不该发生，但外置存储被拆分时有可能）才回退到拷贝。
+                if (!src.renameTo(dst)) {
+                    copyFile(src, dst);
+                }
                 count++;
             }
         }
         return count;
+    }
+
+    /**
+     * 逐字节拷贝（renameTo 跨文件系统失败时的回退）。
+     *
+     * 刻意不用 java.nio.file.Files.copy：那是 API 26 才有的，
+     * 而本项目 minSdk 24，Android 7.x 上会直接 NoClassDefFoundError。
+     */
+    private static void copyFile(File src, File dst) throws IOException {
+        try (InputStream in = new FileInputStream(src);
+             OutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+        if (!src.delete()) {
+            Log.w(TAG, "临时文件删除失败（不影响结果）: " + src);
+        }
     }
 
     /** 安装失败时清理临时目录。 */
