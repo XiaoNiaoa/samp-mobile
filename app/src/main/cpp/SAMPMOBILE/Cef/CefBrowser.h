@@ -50,6 +50,8 @@
 #include <cstdint>
 #include <string>
 #include <atomic>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -111,6 +113,21 @@ public:
     // the resulting top-left corner to Java. PC does this inside DrawBrowsers();
     // the math is CSprite::CalcScreenCoors + pivot, identical to manager.cpp.
     void TickWorld2D();
+
+    // ------------------------------------------------------- game-thread queue
+    //
+    // The debug JNI entry points (nativeDebugConnect / nativeDebugDisconnect /
+    // nativeSetStorageRoot / nativeDebugWorld2D) are called from the Android
+    // main thread by CefManager's broadcast receiver. All of them touch state
+    // that only the game thread may mutate - the CEF transport (Connect/
+    // Disconnect), CefResources' storage paths, and the world2d_ vector while
+    // TickWorld2D is iterating it. Running them inline was a straight-up data
+    // race (and, for World2D, a read of the ped pool off-thread).
+    //
+    // They now post a closure here; DrainGameThreadQueue() runs them at the top
+    // of the frame, on the game thread, before anything else touches that state.
+    void PostToGameThread(std::function<void()> job);
+    void DrainGameThreadQueue();
 
     // Debug entry (debuggable builds only): place a World2D browser in front of
     // the camera so the on-device test can verify projection + hit testing.
@@ -326,4 +343,8 @@ private:
     // 见 SetWorld2DProbeAll()。默认关：正常玩家不该为每条 World2D 付上报开销。
     // Java 线程（广播）写、游戏线程读，所以用原子量而不是裸 bool。
     std::atomic<bool> world2dProbeAll_{ false };
+
+    // Java main thread -> game thread job queue (see PostToGameThread above).
+    std::mutex gameQueueMutex_;
+    std::deque<std::function<void()>> gameQueue_;
 };

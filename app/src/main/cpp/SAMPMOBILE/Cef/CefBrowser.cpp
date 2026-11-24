@@ -997,6 +997,37 @@ void CefBrowser::SetWorld2DProbeAll(bool on)
     LOGI("[CefBrowser] world2d probe-all=%d (%zu World2D browsers)", on ? 1 : 0, world2d_.size());
 }
 
+void CefBrowser::PostToGameThread(std::function<void()> job)
+{
+    if (!job)
+        return;
+    {
+        std::lock_guard<std::mutex> lock(gameQueueMutex_);
+        // Bounded: a stuck game loop must not let the main thread grow this
+        // without limit. Dropping the oldest is fine for debug entry points.
+        if (gameQueue_.size() >= 64)
+        {
+            LOGW("[CefBrowser] game-thread queue full - dropping oldest job");
+            gameQueue_.pop_front();
+        }
+        gameQueue_.push_back(std::move(job));
+    }
+}
+
+void CefBrowser::DrainGameThreadQueue()
+{
+    std::deque<std::function<void()>> local;
+    {
+        std::lock_guard<std::mutex> lock(gameQueueMutex_);
+        local.swap(gameQueue_);
+    }
+    for (auto& job : local)
+    {
+        if (job)
+            job();
+    }
+}
+
 void CefBrowser::DebugCreateWorld2D(int32_t id, float heightAbovePed, float width, float height)
 {
     sa::CPed* ped = GamePool_FindPlayerPed();
@@ -1750,13 +1781,24 @@ Java_com_sampmobile_game_ui_cef_CefManager_nativeDebugConnect(
     std::string hostStr(chars);
     env->ReleaseStringUTFChars(host, chars);
 
-    CefSession::Get().DebugConnect(hostStr, static_cast<uint16_t>(port), playerId);
+    // Android main thread -> game thread. DebugConnect tears down and re-arms
+    // the transport, which Tick() also drives under debugMutex_; doing that
+    // inline from another thread would race the connect path.
+    const uint16_t portNum = static_cast<uint16_t>(port);
+    CefBrowser::Get().PostToGameThread([hostStr, portNum, playerId]() {
+        CefSession::Get().DebugConnect(hostStr, portNum, playerId);
+    });
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_sampmobile_game_ui_cef_CefManager_nativeDebugDisconnect(JNIEnv*, jclass)
 {
-    CefSession::Get().DebugDisconnect();
+    // Same reason as DebugConnect: debugActive_ / network_ / debugMutex_ are
+    // game-thread state, and DebugDisconnect also fires the session-lost path
+    // that walks CefBrowser's containers.
+    CefBrowser::Get().PostToGameThread([]() {
+        CefSession::Get().DebugDisconnect();
+    });
 }
 
 // CefManager.install(): <filesDir>/cef, the root for cache/ and resources/.
@@ -1765,7 +1807,13 @@ Java_com_sampmobile_game_ui_cef_CefManager_nativeSetStorageRoot(JNIEnv* env, jcl
 {
     if (!root)
         return;
-    cefres::CefResources::Get().SetStorageRoot(JavaUtf8(env, root));
+    // storageRoot_ / cacheDir_ are read by Tick() and by the manifest walk on
+    // the game thread; assigning them from the main thread was a torn-std::string
+    // race. Write them on the game thread instead.
+    const std::string rootStr = JavaUtf8(env, root);
+    CefBrowser::Get().PostToGameThread([rootStr]() {
+        cefres::CefResources::Get().SetStorageRoot(rootStr);
+    });
 }
 
 // window.cef.emit(name, ...args) -> CefJsBridge -> here (Android main thread).
@@ -1811,7 +1859,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_sampmobile_game_ui_cef_CefManager_nativeDebugWorld2D(
     JNIEnv*, jclass, jint id, jfloat heightAbovePed, jfloat width, jfloat height)
 {
-    CefBrowser::Get().DebugCreateWorld2D(id, heightAbovePed, width, height);
+    // DebugCreateWorld2D reads the local ped's matrix (GamePool_FindPlayerPed)
+    // and pushes into world2d_, which TickWorld2D iterates on the game thread.
+    // Both are illegal off the game thread - queue it.
+    CefBrowser::Get().PostToGameThread([id, heightAbovePed, width, height]() {
+        CefBrowser::Get().DebugCreateWorld2D(id, heightAbovePed, width, height);
+    });
 }
 
 // Debug-only: make every World2D browser report its projected rect over the

@@ -439,6 +439,9 @@ void Client::process(bool canRender2d)
 	// the debug direct-connect path (tools/cef_kat/run_browser_test.sh) works in
 	// offline mode; Tick() itself resets when SA-MP is not connected.
 	CefBrowser::Get().Install();
+	// Run JNI debug entry points that arrived on the Android main thread, on
+	// this (game) thread, before anything else touches CEF state this frame.
+	CefBrowser::Get().DrainGameThreadQueue();
 	CefSession::Get().Tick();
 	// World2D: project every world-anchored page to screen space once per frame,
 	// on the game thread (the same thread the PC client projects from).
