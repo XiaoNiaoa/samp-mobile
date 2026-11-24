@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <thread>
 #include <vector>
 
 #include <dirent.h>
@@ -31,6 +33,9 @@ namespace
 constexpr size_t kMaxResourceFileSize = 512ull * 1024 * 1024;
 constexpr size_t kMinChunkBytes = 64;
 constexpr uint64_t kStallWarnMs = 15000;
+// How many times a single file may be re-requested after a failed integrity
+// check or extraction before the client gives up and just logs it.
+constexpr int kMaxRetries = 2;
 
 uint64_t NowMs()
 {
@@ -294,13 +299,47 @@ void CefResources::ResetState()
     requested_.clear();
     expected_.clear();
     assembling_.clear();
+    needRequest_.clear();
+    retries_.clear();
+    ++generation_;
     downloadCompleteSent_ = false;
     completedFiles_ = 0;
     totalFiles_ = 0;
+    pendingCacheChecks_ = 0;
+    pendingExtractions_ = 0;
+
+    // Drop anything still waiting in the worker queue: it belongs to the
+    // session that just went away. A job already executing cannot be stopped,
+    // but its result is discarded by the generation check in DrainResults().
+    {
+        std::lock_guard<std::mutex> lock(workMutex_);
+        workQueue_.clear();
+    }
+}
+
+void CefResources::EnsureWorker()
+{
+    if (workerStarted_)
+        return;
+    workerStarted_ = true;
+    worker_ = std::thread([this] { WorkerMain(); });
+    LOGI("[CefResources] worker thread started");
 }
 
 void CefResources::Tick()
 {
+    // Always drain first: results may complete the last file and unblock the
+    // ready handler, independently of which state we are in.
+    if (workerStarted_)
+        DrainResults();
+
+    if (state_ == State::VerifyingCache)
+    {
+        // DrainResults() calls FinishCacheVerification() when the counter hits
+        // zero; nothing else to do while cache hashes are still running.
+        return;
+    }
+
     if (state_ != State::AwaitingTrigger)
     {
         if (state_ == State::Downloading && lastActivityMs_ != 0)
@@ -325,6 +364,7 @@ void CefResources::Tick()
 
 void CefResources::TriggerDownload()
 {
+    EnsureWorker();
     state_ = State::VerifyingCache;
 
     cefjson::Value manifest;
@@ -346,8 +386,19 @@ void CefResources::TriggerDownload()
     requested_.clear();
     expected_.clear();
     assembling_.clear();
+    needRequest_.clear();
+    retries_.clear();
+    ++generation_;
     completedFiles_ = 0;
     totalFiles_ = 0;
+    pendingCacheChecks_ = 0;
+    pendingExtractions_ = 0;
+
+    // Discard jobs left over from a previous trigger before queueing this one.
+    {
+        std::lock_guard<std::mutex> lock(workMutex_);
+        workQueue_.clear();
+    }
 
     for (const auto& [resourceName, files] : manifest.object)
     {
@@ -401,24 +452,48 @@ void CefResources::TriggerDownload()
 
             ++totalFiles_;
 
+            const std::string key = FileKey(resourceName, path);
+            expected_[key] = expected;
+
             // Cache check: a matching pak on disk means the decrypted tree can
-            // be rebuilt locally without asking the server for anything.
-            if (FileExists(expected.savePath) && VerifyAndExtract(expected, expected.savePath))
+            // be rebuilt locally without asking the server for anything. The
+            // hash + unzip + decrypt work is heavy, so hand it to the worker
+            // and finalise in DrainResults() once every result is back.
+            if (!FileExists(expected.savePath))
             {
-                ++completedFiles_;
+                needRequest_.insert(key);
                 continue;
             }
 
-            requested_.push_back(expected);
-            expected_[FileKey(resourceName, path)] = std::move(expected);
+            WorkItem item;
+            item.key = key;
+            item.generation = generation_;
+            item.cacheVerify = true;
+            item.pakPath = expected.savePath;
+            item.hash = expected.hash;
+            item.size = expected.size;
+            item.savePath = expected.savePath;
+            item.extractDir = expected.extractDir;
+            item.masterKey = masterKey_;
+            ++pendingCacheChecks_;
+            EnqueueWork(std::move(item));
         }
     }
 
-    const std::string resourceRoot = resourcesRoot;
-    if (requested_.empty())
+    if (pendingCacheChecks_ == 0)
+        FinishCacheVerification();
+    else
+        LOGI("[CefResources] verifying %zu cached file(s) on the worker thread (%zu/%zu total)",
+             pendingCacheChecks_, pendingCacheChecks_, totalFiles_);
+}
+
+// Runs on the game thread once every cache-verify job has reported back.
+void CefResources::FinishCacheVerification()
+{
+    if (needRequest_.empty())
     {
         LOGI("[CefResources] all %zu file(s) already cached under %s",
-             totalFiles_, resourceRoot.c_str());
+             totalFiles_, ResourceRoot().c_str());
         state_ = State::Completed;
         SendDownloadComplete();
         if (readyHandler_)
@@ -426,27 +501,59 @@ void CefResources::TriggerDownload()
         return;
     }
 
+    std::vector<std::string> keys(needRequest_.begin(), needRequest_.end());
+    RequestFiles(keys);
+}
+
+void CefResources::RequestFiles(const std::vector<std::string>& keys)
+{
+    if (keys.empty())
+    {
+        CompleteIfDone();
+        return;
+    }
+
     cefproto::NetworkPacket packet;
     packet.type = cefproto::PacketType::RequestFiles;
-    packet.requestFiles.files.reserve(requested_.size());
-    for (const auto& file : requested_)
-        packet.requestFiles.files.emplace_back(file.resourceName, file.relativePath);
+    packet.requestFiles.files.reserve(keys.size());
+    for (const auto& key : keys)
+    {
+        const auto it = expected_.find(key);
+        if (it == expected_.end())
+            continue;
+        packet.requestFiles.files.emplace_back(it->second.resourceName, it->second.relativePath);
+        requested_.push_back(it->second);
+    }
+
+    if (packet.requestFiles.files.empty())
+    {
+        CompleteIfDone();
+        return;
+    }
 
     if (!sender_(packet))
     {
         LOGE("[CefResources] cannot send RequestFiles - retrying on next tick");
+        // Keep the keys so the next AwaitingTrigger pass retries them instead
+        // of silently forgetting a file we know we need.
+        for (const auto& key : keys)
+            needRequest_.insert(key);
+        requested_.clear();
         state_ = State::AwaitingTrigger;
         return;
     }
 
+    if (state_ != State::Downloading)
+        SendClientEvent(cefproto::ClientEvent::DownloadStart);
+
     state_ = State::Downloading;
-    SendClientEvent(cefproto::ClientEvent::DownloadStart);
     lastActivityMs_ = NowMs();
     lastStallLogMs_ = 0;
-    LOGI("[CefResources] requested %zu of %zu file(s):", requested_.size(), totalFiles_);
+    LOGI("[CefResources] requested %zu of %zu file(s):", packet.requestFiles.files.size(), totalFiles_);
     for (const auto& file : requested_)
         LOGI("[CefResources]   %s/%s (%zu bytes)", file.resourceName.c_str(),
              file.relativePath.c_str(), file.size);
+    requested_.clear();
 }
 
 void CefResources::OnFileData(const cefproto::FileDataPacket& packet)
@@ -516,36 +623,34 @@ void CefResources::OnFileData(const cefproto::FileDataPacket& packet)
     for (const auto& chunk : assembly.chunks)
         complete.insert(complete.end(), chunk.begin(), chunk.end());
 
-    // Verify against the manifest, never against the packet's own hash field.
-    const std::string receivedHash = cefcrypto::Sha256Hex(complete.data(), complete.size());
-    if (complete.size() != expected.size || receivedHash != expected.hash)
-    {
-        LOGE("[CefResources] integrity check failed for '%s': expected %s (%zu bytes), got %s (%zu bytes)",
-             key.c_str(), expected.hash.c_str(), expected.size,
-             receivedHash.c_str(), complete.size());
-        assembling_.erase(key);
-        return;
-    }
-
-    if (!WriteFileAtomic(expected.savePath, complete))
-    {
-        assembling_.erase(key);
-        return;
-    }
-    LOGI("[CefResources] '%s' saved (%zu bytes, sha256 ok)", key.c_str(), complete.size());
-
-    if (!ExtractPak(expected, complete))
-    {
-        assembling_.erase(key);
-        return;
-    }
-
+    // `assembly` points into assembling_; capture what we still need for the
+    // log line *before* the erase invalidates the reference.
+    const size_t assembledBytes = assembly.receivedBytes;
     assembling_.erase(key);
-    ++completedFiles_;
-    CompleteIfDone();
+
+    // Everything below is heavy (SHA-256 over the whole pak, atomic write,
+    // unzip + AES decrypt of every entry). Do none of it on the game thread:
+    // hand the assembled bytes to the worker and let DrainResults() account
+    // for the outcome.
+    WorkItem item;
+    item.key = key;
+    item.generation = generation_;
+    item.cacheVerify = false;
+    item.data = std::move(complete);
+    item.hash = expected.hash;
+    item.size = expected.size;
+    item.savePath = expected.savePath;
+    item.extractDir = expected.extractDir;
+    item.masterKey = masterKey_;
+    ++pendingExtractions_;
+    EnqueueWork(std::move(item));
+
+    LOGI("[CefResources] '%s' assembled (%zu bytes) - verifying on worker",
+         key.c_str(), assembledBytes);
 }
 
-bool CefResources::ExtractPak(const ExpectedFile& file, const std::vector<uint8_t>& pak)
+bool CefResources::ExtractPak(const ExpectedFile& file, const std::vector<uint8_t>& pak,
+                             const std::vector<uint8_t>& masterKey)
 {
     const std::string markerPath = file.extractDir + "/.cefhash";
 
@@ -586,10 +691,10 @@ bool CefResources::ExtractPak(const ExpectedFile& file, const std::vector<uint8_
     for (const auto& entry : entries)
     {
         std::vector<uint8_t> plain;
-        if (!cefcrypto::DecodeResourceEntry(entry.data, masterKey_, plain))
+        if (!cefcrypto::DecodeResourceEntry(entry.data, masterKey, plain))
         {
             LOGW("[CefResources] cannot decode '%s' in '%s' (key %zu bytes)",
-                 entry.name.c_str(), file.resourceName.c_str(), masterKey_.size());
+                 entry.name.c_str(), file.resourceName.c_str(), masterKey.size());
             ++skipped;
             continue;
         }
@@ -643,27 +748,21 @@ bool CefResources::ExtractPak(const ExpectedFile& file, const std::vector<uint8_
     return true;
 }
 
-bool CefResources::VerifyAndExtract(const ExpectedFile& file, const std::string& pakPath)
-{
-    // 先流式校验（1MB 缓冲，与文件大小无关），通过后再整文件读入解包。
-    // 原来无论文件多大都先整块读进内存再算哈希，主线程上几十 MB 的包
-    // 会造成明显掉帧。校验不过的文件连读都不用读。
-    if (cefcrypto::Sha256FileHex(pakPath.c_str(), kMaxResourceFileSize) != file.hash)
-        return false;
-
-    std::vector<uint8_t> pak;
-    if (!ReadFile(pakPath, pak, kMaxResourceFileSize))
-        return false;
-    return ExtractPak(file, pak);
-}
-
 void CefResources::CompleteIfDone()
 {
+    // A file only counts once the worker finished it. Anything still queued
+    // (cache hashes or extract/decrypt jobs) means "not done yet".
+    if (pendingCacheChecks_ > 0 || pendingExtractions_ > 0)
+        return;
+
     if (completedFiles_ < totalFiles_)
     {
         LOGI("[CefResources] progress %zu/%zu file(s)", completedFiles_, totalFiles_);
         return;
     }
+
+    if (state_ == State::Completed)
+        return;
 
     state_ = State::Completed;
     LOGI("[CefResources] all %zu file(s) ready under %s", totalFiles_, ResourceRoot().c_str());
@@ -704,6 +803,217 @@ void CefResources::SendClientEvent(const char* name)
         LOGI("[CefResources] ClientEmitEvent '%s' sent", name);
     else
         LOGE("[CefResources] ClientEmitEvent '%s' could not be sent", name);
+}
+
+void CefResources::EnqueueWork(WorkItem item)
+{
+    {
+        std::lock_guard<std::mutex> lock(workMutex_);
+        workQueue_.push_back(std::move(item));
+    }
+    workCv_.notify_one();
+}
+
+// Worker thread. Reads only fields carried by the WorkItem plus the pure
+// helpers in the anonymous namespace above; it never touches member state, so
+// there is nothing to lock beyond the queue itself.
+void CefResources::WorkerMain()
+{
+    while (true)
+    {
+        WorkItem item;
+        {
+            std::unique_lock<std::mutex> lock(workMutex_);
+            workCv_.wait(lock, [this] { return workerStop_ || !workQueue_.empty(); });
+            if (workerStop_)
+                return;
+            item = std::move(workQueue_.front());
+            workQueue_.pop_front();
+        }
+
+        // Rebuild a local ExpectedFile from the WorkItem so ExtractPak needs no
+        // access to expected_ (which the game thread owns).
+        ExpectedFile file;
+        file.hash = item.hash;
+        file.size = item.size;
+        file.savePath = item.savePath;
+        file.extractDir = item.extractDir;
+        // resourceName is only used for log lines; derive it from extractDir.
+        const size_t slash = item.extractDir.find_last_of('/');
+        file.resourceName = slash == std::string::npos ? item.extractDir
+                                                       : item.extractDir.substr(slash + 1);
+
+        bool ok = false;
+        if (item.cacheVerify)
+        {
+            // Pak is already on disk: hash it, and only pay for the unzip when
+            // it still matches the manifest.
+            std::vector<uint8_t> pak;
+            if (ReadFile(item.pakPath, pak, kMaxResourceFileSize))
+            {
+                if (cefcrypto::Sha256Hex(pak.data(), pak.size()) != item.hash)
+                {
+                    LOGW("[CefResources] cache-verify '%s': hash mismatch, will re-download",
+                         item.key.c_str());
+                }
+                else
+                {
+                    ok = ExtractPak(file, pak, item.masterKey);
+                }
+            }
+            else
+            {
+                LOGW("[CefResources] cache-verify '%s': cannot read %s",
+                     item.key.c_str(), item.pakPath.c_str());
+            }
+        }
+        else
+        {
+            // Fresh download assembled by OnFileData: verify + store the pak,
+            // then extract. Nothing here ran on the game thread.
+            if (item.data.size() == item.size &&
+                cefcrypto::Sha256Hex(item.data.data(), item.data.size()) == item.hash)
+            {
+                if (WriteFileAtomic(item.savePath, item.data))
+                {
+                    LOGI("[CefResources] '%s' saved (%zu bytes, sha256 ok)",
+                         item.key.c_str(), item.data.size());
+                    ok = ExtractPak(file, item.data, item.masterKey);
+                }
+                else
+                {
+                    LOGE("[CefResources] '%s': cannot write %s",
+                         item.key.c_str(), item.savePath.c_str());
+                }
+            }
+            else
+            {
+                LOGE("[CefResources] '%s': integrity check failed (expected %s / %zu bytes, got %zu bytes)",
+                     item.key.c_str(), item.hash.c_str(), item.size, item.data.size());
+            }
+        }
+
+        // Free the (potentially multi-megabyte) payload before reporting back.
+        item.data.clear();
+        item.data.shrink_to_fit();
+        item.masterKey.clear();
+        item.masterKey.shrink_to_fit();
+
+        WorkResult result;
+        result.key = std::move(item.key);
+        result.generation = item.generation;
+        result.ok = ok;
+        result.cacheVerify = item.cacheVerify;
+        {
+            std::lock_guard<std::mutex> lock(resultMutex_);
+            resultQueue_.push_back(std::move(result));
+        }
+    }
+}
+
+void CefResources::DrainResults()
+{
+    std::vector<WorkResult> local;
+    {
+        std::lock_guard<std::mutex> lock(resultMutex_);
+        local.swap(resultQueue_);
+    }
+    if (local.empty())
+        return;
+
+    for (auto& result : local)
+    {
+        if (result.generation != generation_)
+        {
+            // Job was enqueued before the last reset: its counters belong to a
+            // session that no longer exists. Never let it touch this one.
+            LOGI("[CefResources] dropping stale worker result '%s' (gen %u != %u)",
+                 result.key.c_str(), result.generation, generation_);
+            continue;
+        }
+
+        if (result.cacheVerify)
+        {
+            pendingCacheChecks_ = pendingCacheChecks_ > 0 ? pendingCacheChecks_ - 1 : 0;
+            if (result.ok)
+            {
+                ++completedFiles_;
+                LOGI("[CefResources] cache hit '%s' (%zu/%zu)",
+                     result.key.c_str(), completedFiles_, totalFiles_);
+            }
+            else
+            {
+                // Corrupted or unreadable cached pak: ask the server for it.
+                LOGW("[CefResources] cache miss '%s' - queuing re-download", result.key.c_str());
+                needRequest_.insert(result.key);
+            }
+            continue;
+        }
+
+        pendingExtractions_ = pendingExtractions_ > 0 ? pendingExtractions_ - 1 : 0;
+        if (result.ok)
+        {
+            ++completedFiles_;
+            LOGI("[CefResources] '%s' ready (%zu/%zu)", result.key.c_str(),
+                 completedFiles_, totalFiles_);
+        }
+        else
+        {
+            // Integrity or extraction failed. Re-request so a bad transfer does
+            // not leave the client stuck waiting forever - but cap the retries,
+            // a server that keeps sending a corrupt pak must not loop forever.
+            int& tries = retries_[result.key];
+            if (tries < kMaxRetries)
+            {
+                ++tries;
+                LOGE("[CefResources] '%s' failed verification - re-requesting (%d/%d)",
+                     result.key.c_str(), tries, kMaxRetries);
+                needRequest_.insert(result.key);
+            }
+            else
+            {
+                LOGE("[CefResources] '%s' failed verification %d times - giving up",
+                     result.key.c_str(), tries);
+            }
+        }
+    }
+
+    if (state_ == State::VerifyingCache && pendingCacheChecks_ == 0)
+    {
+        FinishCacheVerification();
+        return;
+    }
+
+    // A failed download that was re-queued needs a fresh RequestFiles.
+    if (state_ == State::Downloading && !needRequest_.empty() && assembling_.empty()
+        && pendingExtractions_ == 0)
+    {
+        std::vector<std::string> keys(needRequest_.begin(), needRequest_.end());
+        needRequest_.clear();
+        LOGI("[CefResources] re-requesting %zu failed file(s)", keys.size());
+        RequestFiles(keys);
+        return;
+    }
+
+    if (state_ == State::Downloading)
+        CompleteIfDone();
+}
+
+void CefResources::Shutdown()
+{
+    {
+        std::lock_guard<std::mutex> lock(workMutex_);
+        workerStop_ = true;
+    }
+    workCv_.notify_all();
+    if (worker_.joinable())
+        worker_.join();
+    workerStarted_ = false;
+}
+
+CefResources::~CefResources()
+{
+    Shutdown();
 }
 
 } // namespace cefres
