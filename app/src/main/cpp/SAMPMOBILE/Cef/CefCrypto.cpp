@@ -199,7 +199,11 @@ std::vector<uint8_t> AesCbcDecrypt(const std::vector<uint8_t>& encrypted,
                                    const std::vector<uint8_t>& key,
                                    const std::array<uint8_t, AES_IV_BYTES>& iv)
 {
-    if (key.empty() || encrypted.size() % AES_BLOCKLEN != 0) return {};
+    // 密钥长度必须正好是 AES_KEYLEN：AES_init_ctx_iv 按 AES_KEYLEN 读 key.data()，
+    // 只检查 empty() 时，恶意服下发一个短 master_resource_key 会让它读到缓冲区之外
+    // （堆越界读，读到什么就当密钥扩展材料）。
+    if (key.size() != AES_KEYLEN || encrypted.empty() || encrypted.size() % AES_BLOCKLEN != 0)
+        return {};
     AES_ctx ctx;
     AES_init_ctx_iv(&ctx, key.data(), iv.data());
     std::vector<uint8_t> data = encrypted;
@@ -224,7 +228,10 @@ bool DecodeLegacy(const std::vector<uint8_t>& input,
     std::copy_n(input.begin(), AES_IV_BYTES, iv.begin());
     std::vector<uint8_t> ciphertext(input.begin() + AES_IV_BYTES, input.end());
     output = AesCbcDecrypt(ciphertext, masterKey, iv);
-    return !output.empty() || ciphertext.size() == AES_BLOCKLEN;
+    // 只有解出非空明文才算成功。原来还允许「密文恰好一个 block 且解出空」，
+    // 那是把 padding 校验失败（AesCbcDecrypt 返回 {}）误判成"空文件，成功"，
+    // 上层会拿着空 vector 继续走解包流程。
+    return !output.empty();
 }
 
 } // namespace
@@ -257,7 +264,52 @@ bool DecodeResourceEntry(const std::vector<uint8_t>& input,
     std::vector<uint8_t> ciphertext(input.begin() + kHeaderBytes + AES_IV_BYTES, input.end());
 
     output = AesCbcDecrypt(ciphertext, masterKey, iv);
-    return !output.empty() || ciphertext.size() == AES_BLOCKLEN;
+    // 只有解出非空明文才算成功。原来还允许「密文恰好一个 block 且解出空」，
+    // 那是把 padding 校验失败（AesCbcDecrypt 返回 {}）误判成"空文件，成功"，
+    // 上层会拿着空 vector 继续走解包流程。
+    return !output.empty();
+}
+
+
+std::string Sha256FileHex(const char* path, size_t maxBytes)
+{
+    if (!path)
+        return {};
+
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return {};
+
+    // 流式哈希：1MB 缓冲，内存峰值与文件大小无关。
+    // 原来的路径是 ReadFile 整块读入 + Sha256Hex，几十 MB 的包在游戏主线程
+    // 上会造成明显掉帧，且同时占用两份内存（文件 + 哈希拷贝）。
+    picosha2::hash256_one_by_one hasher;
+    std::vector<uint8_t> buf(1024 * 1024);
+    size_t total = 0;
+    bool tooBig = false;
+
+    for (;;)
+    {
+        const size_t n = fread(buf.data(), 1, buf.size(), f);
+        if (n == 0)
+            break;
+        total += n;
+        if (total > maxBytes)
+        {
+            tooBig = true;
+            break;
+        }
+        hasher.process(buf.begin(), buf.begin() + static_cast<ptrdiff_t>(n));
+    }
+    fclose(f);
+
+    if (tooBig || total == 0)
+        return {};
+
+    hasher.finish();
+    std::array<uint8_t, picosha2::k_digest_size> hash{};
+    hasher.get_hash_bytes(hash.begin(), hash.end());
+    return picosha2::bytes_to_hex_string(hash.begin(), hash.end());
 }
 
 } // namespace cefcrypto

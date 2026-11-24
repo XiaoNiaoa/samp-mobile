@@ -268,10 +268,34 @@ void CefNetwork::HandleRawMessage(const uint8_t* data, size_t size)
             if (ikcp_input(kcp_, reinterpret_cast<const char*>(data), static_cast<long>(size)) < 0)
                 LOGW("[CefNet] ikcp_input error");
 
-            char kcpBuf[65536];
-            int msgSize;
-            while ((msgSize = ikcp_recv(kcp_, kcpBuf, sizeof(kcpBuf))) > 0)
-                kcpMessages.emplace_back(kcpBuf, kcpBuf + msgSize);
+            // 按 ikcp_peeksize 先问这条消息多大，再决定缓冲大小。
+            // 原来固定 64KB 栈缓冲，服务端发一条更大的消息时 ikcp_recv 返回 -3
+            // （缓冲区不够），循环退出但消息仍留在队列头部 —— 之后每次进来都
+            // 撞同一条，接收流永久卡死。这里显式检测 -3 并按需扩容。
+            std::vector<char> kcpBuf;
+            for (;;)
+            {
+                const int peek = ikcp_peeksize(kcp_);
+                if (peek < 0)
+                    break;   // 没有完整消息
+
+                if (static_cast<size_t>(peek) > kcpBuf.size())
+                    kcpBuf.resize(static_cast<size_t>(peek));
+
+                const int msgSize = ikcp_recv(kcp_, kcpBuf.data(),
+                                              static_cast<int>(kcpBuf.size()));
+                if (msgSize == -3)
+                {
+                    // 理论上前面的 resize 已经覆盖，走到这里说明 peeksize 与实际不符：
+                    // 丢弃这条超限消息，否则会永远卡在队头。
+                    LOGW("[CefNet] KCP message rejected (peeksize %d)", peek);
+                    break;
+                }
+                if (msgSize < 0)
+                    break;
+
+                kcpMessages.emplace_back(kcpBuf.data(), kcpBuf.data() + msgSize);
+            }
         }
     }
 

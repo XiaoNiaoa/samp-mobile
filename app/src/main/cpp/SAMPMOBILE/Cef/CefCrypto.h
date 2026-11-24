@@ -72,6 +72,17 @@ std::vector<uint8_t> DecryptPacket(const uint8_t* data, size_t size,
 // Lowercase hex SHA-256 (resource manifest/file hashes).
 std::string Sha256Hex(const uint8_t* data, size_t size);
 
+/**
+ * 分块计算文件 SHA-256（小写 hex）。
+ *
+ * 资源包可能有几十到上百 MB，ReadFile + Sha256Hex 需要把整个文件放进内存，
+ * 而这个调用点在游戏主线程。流式读取只用 1MB 缓冲，内存峰值与文件大小无关。
+ *
+ * @param maxBytes 最多读取的字节数；超过则视为失败（防止被超大文件拖死）
+ * @return 失败（打不开 / 超限）返回空串
+ */
+std::string Sha256FileHex(const char* path, size_t maxBytes);
+
 // Decodes one stored resource file (OCEF2 format, or legacy raw IV||ct).
 // Mirrors DecodeResourceEntry() in src/shared/crypto.hpp.
 bool DecodeResourceEntry(const std::vector<uint8_t>& input,

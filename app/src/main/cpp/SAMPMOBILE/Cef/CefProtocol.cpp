@@ -1,6 +1,7 @@
 #include "CefProtocol.h"
 
 #include <algorithm>
+#include <android/log.h>
 #include <cstring>
 
 namespace cefproto
@@ -29,12 +30,12 @@ public:
 
     void PutString(const std::string& s)
     {
-        uint16_t len = static_cast<uint16_t>(s.length());
-        if (len > MAX_STRING_BYTES)
-            len = MAX_STRING_BYTES;
-        PutU16(len);
+        // 先按 size_t 截断再转 uint16_t：原来先 static_cast<uint16_t> 再比较，
+        // 长度 65536 会被截成 0（写出"空串"），65537 会变成 1，全是错的线上数据。
+        const size_t len = s.length() > MAX_STRING_BYTES ? MAX_STRING_BYTES : s.length();
+        PutU16(static_cast<uint16_t>(len));
         if (len > 0)
-            PutRaw(s.data(), std::min<size_t>(len, s.length()));
+            PutRaw(s.data(), len);
     }
 
     void PutBytes(const std::vector<uint8_t>& bytes)
@@ -80,7 +81,9 @@ public:
         uint16_t len = 0;
         if (!GetU16(len)) return false;
         if (len == 0) { out.clear(); return true; }
-        if (pos_ + len > size_) return false;
+        // 用减法判断剩余量：pos_ + len 在 32 位目标上可能回绕，
+        // 从而让一个超大 len 绕过边界检查（越界读）。
+        if (len > size_ - pos_) return false;
         out.assign(reinterpret_cast<const char*>(data_ + pos_), len);
         pos_ += len;
         return true;
@@ -91,7 +94,8 @@ public:
         uint32_t len = 0;
         if (!GetU32(len)) return false;
         if (len == 0) { out.clear(); return true; }
-        if (pos_ + len > size_) return false;
+        // 同上：减法形式对 32 位安全
+        if (len > size_ - pos_) return false;
         out.assign(data_ + pos_, data_ + pos_ + len);
         pos_ += len;
         return true;
@@ -221,13 +225,21 @@ bool SerializePacket(const NetworkPacket& packet, std::vector<uint8_t>& out)
 
         case PacketType::RequestFiles: {
             const RequestFilesPacket& p = packet.requestFiles;
-            w.PutU16(static_cast<uint16_t>(p.files.size()));
-            for (const auto& [resourceName, relativePath] : p.files)
+            // 先过滤再计数：原来先写 files.size() 再在循环里 continue 跳过空项，
+            // 线上"声明 N 条、实际 N-k 条"，对端按 count 读会错位甚至读越界。
+            std::vector<const std::pair<std::string, std::string>*> valid;
+            valid.reserve(p.files.size());
+            for (const auto& entry : p.files)
             {
-                if (resourceName.empty() || relativePath.empty())
+                if (entry.first.empty() || entry.second.empty())
                     continue;
-                w.PutString(resourceName);
-                w.PutString(relativePath);
+                valid.push_back(&entry);
+            }
+            w.PutU16(static_cast<uint16_t>(valid.size()));
+            for (const auto* entry : valid)
+            {
+                w.PutString(entry->first);
+                w.PutString(entry->second);
             }
             break;
         }
@@ -380,6 +392,13 @@ bool DeserializePacket(const uint8_t* data, size_t size, NetworkPacket& out)
             // No payload deserializer on the PC side either; the type byte is
             // the entire meaningful content.
             break;
+
+        default:
+            // 未知类型：原来会掉出 switch 直接 return true，上层拿到一个
+            // 只有 type 被赋值、载荷全空的 packet，行为不可预期。明确拒绝。
+            __android_log_print(ANDROID_LOG_WARN, "CefProto",
+                            "unknown packet type %u", static_cast<unsigned>(out.type));
+            return false;
     }
 
     return true;

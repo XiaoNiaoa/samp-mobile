@@ -645,10 +645,14 @@ bool CefResources::ExtractPak(const ExpectedFile& file, const std::vector<uint8_
 
 bool CefResources::VerifyAndExtract(const ExpectedFile& file, const std::string& pakPath)
 {
+    // 先流式校验（1MB 缓冲，与文件大小无关），通过后再整文件读入解包。
+    // 原来无论文件多大都先整块读进内存再算哈希，主线程上几十 MB 的包
+    // 会造成明显掉帧。校验不过的文件连读都不用读。
+    if (cefcrypto::Sha256FileHex(pakPath.c_str(), kMaxResourceFileSize) != file.hash)
+        return false;
+
     std::vector<uint8_t> pak;
     if (!ReadFile(pakPath, pak, kMaxResourceFileSize))
-        return false;
-    if (cefcrypto::Sha256Hex(pak.data(), pak.size()) != file.hash)
         return false;
     return ExtractPak(file, pak);
 }

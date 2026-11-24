@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  omp-cef 的页面资源由本地 CefResourceProvider 在 http://cef/ 这个虚拟主机上供出，
+  WebView 访问它必须允许明文。但没必要为此全局打开 usesCleartextTraffic ——
+  那会让 App 内任何 WebView（包括服务端下发的页面）都能加载任意 http 明文地址。
+
+  这里只对 cef 这一个域放行，其余仍走系统默认（Android 9+ 禁止明文）。
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">cef</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

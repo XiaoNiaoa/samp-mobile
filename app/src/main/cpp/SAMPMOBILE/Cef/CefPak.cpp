@@ -136,6 +136,7 @@ bool ReadArchive(const std::vector<uint8_t>& pak,
         Fail(error, "archive has no entries");
         return false;
     }
+    uint64_t totalUncompressed = 0;
     if (entryCount > MAX_ENTRY_COUNT)
     {
         Fail(error, "too many entries");
@@ -190,6 +191,12 @@ bool ReadArchive(const std::vector<uint8_t>& pak,
             Fail(error, "entry too large: " + name);
             return false;
         }
+        if (totalUncompressed + uncompSize > MAX_TOTAL_UNCOMPRESSED_BYTES)
+        {
+            Fail(error, "archive expands beyond total limit (zip bomb?)");
+            return false;
+        }
+        totalUncompressed += uncompSize;
         if (static_cast<uint64_t>(localOffset) + 30 > pak.size() ||
             ReadU32(&pak[localOffset]) != kLocalSig)
         {

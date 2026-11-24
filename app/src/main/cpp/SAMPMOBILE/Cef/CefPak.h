@@ -29,6 +29,11 @@ struct Entry
 // Hard limits mirroring the PC client (resource_manager.cpp).
 inline constexpr size_t MAX_ENTRY_BYTES = 512ull * 1024 * 1024;
 inline constexpr size_t MAX_ENTRY_COUNT = 4096;
+
+// 累计解压体积上限。单条 512MB x 4096 条 = 2TB，只有单条限制等于没有限制：
+// 一个几百 KB 的包解出 2TB 就能把设备内存/存储吃干（ZIP 炸弹）。
+// 2GiB 对 CEF 资源包足够宽裕（实测 pak 在 100MiB 量级）。
+inline constexpr uint64_t MAX_TOTAL_UNCOMPRESSED_BYTES = 2ull * 1024 * 1024 * 1024;
 inline constexpr size_t MAX_PATH_BYTES   = 512;
 
 // Parses the archive and inflates every entry. Returns false and fills `error`
