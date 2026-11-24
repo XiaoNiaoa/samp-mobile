@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.Objects;
 
 import com.sampmobile.game.SAMP;
+import com.sampmobile.game.ui.cef.CefManager;
 import com.sampmobile.game.ui.widgets.ButtonPanel;
 import com.sampmobile.game.ui.widgets.Chat;
 import com.sampmobile.game.ui.widgets.Dialog;
@@ -138,6 +139,9 @@ public class UI implements ButtonPanel.Listener, Voice.Listener, Dialog.Listener
         if (visible && samp != null) {
             samp.cancelAllNativeTouches();
         }
+        // 游戏聊天输入开/关 -> omp-cef：本地事件发给每个页面，同时上行
+        // ClientEmitEvent(ChatInputState)，对应 PC ChatHook::SetChatInputState。
+        CefManager.onGameChatStateChanged(visible);
     }
 
     public boolean isInputFocused() {
@@ -211,6 +215,17 @@ public class UI implements ButtonPanel.Listener, Voice.Listener, Dialog.Listener
     }
 
     private void showDialog(int dialog_id, int dialog_style, String title, String message, String button1, String button2) {
+        // 2026-11-22: 标题 "#WV#" 是服务端驱动 WebView 覆盖层的约定通道，不弹原生对话框
+        if (title != null && title.startsWith("#WV#")) {
+            try {
+                if (samp != null && samp.webOverlay != null && samp.webOverlay.handleServerDialog(message)) {
+                    Log.i(TAG, "**** showDialog -> WebOverlay: " + message);
+                    return;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "WebOverlay.handleServerDialog failed: " + t);
+            }
+        }
         Log.i(TAG, "**** showDialog " + dialog_id + " " + title + " " + message + " " + button1 + " " + button2);
         samp.runOnUiThread(() -> dialog.show(dialog_id, dialog_style, title, message, button1, button2));
     }
@@ -251,6 +266,12 @@ public class UI implements ButtonPanel.Listener, Voice.Listener, Dialog.Listener
 
     public void showKeyboard(boolean z) {
         Log.i(TAG, "**** showKeyboard " + z);
+        // 页面输入框正拿着键盘且该浏览器 controlsChat=true 时，游戏聊天框让位
+        // （PC ChatHook::Hook_OpenChatInput -> FocusManager::ShouldBlockChat）。
+        if (z && CefManager.shouldBlockChat()) {
+            Log.i(TAG, "**** showKeyboard blocked - focused CEF page owns chat input");
+            return;
+        }
         samp.runOnUiThread(() -> keyboard.show(z));
     }
 

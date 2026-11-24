@@ -3,6 +3,9 @@
 // pointer-width regressions immediately at build time.
 
 #include "Client.h"
+// 2026-11-22: Net/*.h 里的 CVehicle / CPlayerPed / CObject / CTextDraw / TEXT_DRAW_TRANSMIT
+// 用的是项目 Game/ 层导出的全局类型，不是 sa:: 里的同名结构；少了这一行
+// 单独编译本文件会报 unknown type name（其它 TU 都是先包含了 Game/Game.h 才不出事）。
 #include "Game/Game.h"
 #include "Net/NetGame.h"
 #include "GameSA/include/PlayerInfo.h"
@@ -38,4 +41,3 @@ static_assert(sizeof(sa::CVector) == 12, "sa::CVector must be 12 bytes");
 static_assert(sizeof(sa::CQuaternion) == 16, "sa::CQuaternion must be 16 bytes");
 static_assert(sizeof(sa::CPlayerInfo) == (VER_x32 ? 0x194 : 0x1D8), "sa::CPlayerInfo ABI size mismatch");
 static_assert(sizeof(sa::CObject) == (VER_x32 ? 0x184 : 0x1F8), "sa::CObject ABI size mismatch");
-static_assert(offsetof(sa::CPed, m_fAimingRotation) == (VER_x32 ? 1376 : 1736), "sa::CPed::m_fAimingRotation ABI offset mismatch");

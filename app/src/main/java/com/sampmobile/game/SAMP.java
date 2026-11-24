@@ -15,6 +15,8 @@ import java.io.File;
 import java.util.Objects;
 
 import com.sampmobile.game.ui.UI;
+import com.sampmobile.game.ui.WebOverlay;
+import com.sampmobile.game.ui.cef.CefManager;
 import com.sampmobile.launcher.utils.ModManager;
 import com.sampmobile.launcher.utils.SignatureChecker;
 import com.sampmobile.launcher.utils.Utils;
@@ -26,6 +28,7 @@ public class SAMP extends GTASA {
     private static boolean sMonetLoaded = false;
 
     public UI ui;
+    public WebOverlay webOverlay;
 
     private native void initializeSAMP(UI ui, String gameDir, boolean isOffline);
 
@@ -141,6 +144,12 @@ public class SAMP extends GTASA {
 
         ui = new UI(this);
         ui.initializeUI();
+        // 2026-11-22: WebView 覆盖层在游戏加载期间就预热，首次打开无白屏
+        webOverlay = new WebOverlay(this);
+        webOverlay.warmUp();
+
+        // omp-cef 浏览器层：装上 DecorView，服务端 CreateBrowser 事件到达时可立即建窗
+        CefManager.install(this);
 
         // check signature
         if (!SignatureChecker.isSignatureValid(this, getPackageName())) {
@@ -186,10 +195,34 @@ public class SAMP extends GTASA {
 
     @Override
     public void onBackPressed() {
+        // 页面正在接管输入时，返回键先把焦点还给游戏（不销毁页面——生命周期属于服务端）
+        if (CefManager.onBackPressed()) {
+            return;
+        }
+        if (webOverlay != null && webOverlay.onBackPressed()) {
+            return;
+        }
         if (ui != null && ui.onBackPressed()) {
             return;
         }
         super.onBackPressed();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        // 按键上行（PressKey）：必须在 super 之前，否则被输入法/WebView 消费掉就看不到。
+        CefManager.handleKeyEvent(event);
+
+        // BACK 在页面持有焦点时可能被 Chromium 自己吃掉，Activity.onKeyDown 就收不到、
+        // onBackPressed 也不会被调用。所以在派发进视图树之前截住：先释放页面焦点，
+        // 把手势交还给游戏；页面本身留给服务端销毁。
+        if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK
+                && event.getAction() == android.view.KeyEvent.ACTION_UP
+                && CefManager.isAnyBrowserFocused()
+                && CefManager.onBackPressed()) {
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
@@ -203,7 +236,10 @@ public class SAMP extends GTASA {
                 return true;
             }
         }
-        if (ui != null && !ui.isInputFocused()) {
+        // CEF 页面持有焦点时不要把按键喂给引擎（否则会同时触发游戏动作）
+        if (ui != null && !ui.isInputFocused()
+                && (webOverlay == null || !webOverlay.isVisible())
+                && !CefManager.isAnyBrowserFocused()) {
             try {
                 onHardwareKeyEvent(keyCode, true);
             } catch (UnsatisfiedLinkError ignored) {
@@ -218,7 +254,10 @@ public class SAMP extends GTASA {
             mConsumedBackKey = false;
             return true;
         }
-        if (ui != null && !ui.isInputFocused()) {
+        // 同上：CEF 页面持有焦点时不把抬起事件送进引擎
+        if (ui != null && !ui.isInputFocused()
+                && (webOverlay == null || !webOverlay.isVisible())
+                && !CefManager.isAnyBrowserFocused()) {
             try {
                 onHardwareKeyEvent(keyCode, false);
             } catch (UnsatisfiedLinkError ignored) {
@@ -376,6 +415,7 @@ public class SAMP extends GTASA {
         if (ui != null) {
             ui.onResumeEvent();
         }
+        if (webOverlay != null) webOverlay.onResume();
     }
 
     @Override
@@ -389,6 +429,9 @@ public class SAMP extends GTASA {
     @Override
     public void onPause() {
         Log.i(TAG, "**** onPause");
+        if (webOverlay != null) webOverlay.onPause();
+        // 切后台：收起输入法并让出游戏输入，否则回来时焦点还在页面上、摇杆失效
+        CefManager.releaseAllFocus();
         cancelAllNativeTouches();
         super.onPause();
     }
@@ -405,6 +448,11 @@ public class SAMP extends GTASA {
         if (ui != null) {
             ui.destroy();
         }
+        if (webOverlay != null) {
+            webOverlay.destroy();
+        }
+        // 拆除全部 omp-cef WebView，避免跨 Activity 生命周期泄漏
+        CefManager.shutdown();
         super.onDestroy();
         if (isFinishing()) {
             android.os.Process.killProcess(android.os.Process.myPid());

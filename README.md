@@ -4,75 +4,52 @@
 
 > 版权、第三方组件与合规声明请参阅 [NOTICE](NOTICE)。
 
-![启动器主界面](images/4.jpg)
-
 ---
 
 ## 项目简介
 
-本项目基于开源的 Alyn SA-MP Mobile 架构持续演进，面向现代 Android（支持至 **Android 14 / 15，SDK 35**）完成了**启动器全面重写、原生协议层与引擎层地基重构、SA-MP / `open.mp` 广度与深度行为对齐、五合一模组生态共存以及全链路稳定性加固**。
+本项目基于开源的 Alyn SA-MP Mobile 架构作为基础，重新实现 Android 端启动器、修复了大量底层崩溃与兼容性问题、改进、修复、完善了大量内容，优化和修复正确性、稳健性等问题，并提供mod加载支持（五合一模组生态），已经过一定的实机测试，如果你发现新的问题可以联系本人。
 
-客户端设计追求**「向 PC 端 SA-MP / `open.mp` 行为严格对齐，不为移动化而破坏联机协议与反作弊契约」**：凡涉及核心同步、战斗判定、载具状态机、单机残留屏蔽与服务器反作弊兼容的环节，均以 `open.mp` 上游源码、官方文档及 `libGTASA.so`（arm64 / arm32）反汇编作为对照基准；仅针对触屏交互、Android 窗口/进程隔离、高分辨率中文字库图集与现代系统安全策略做移动侧工程适配。
-
-### 关键工程指标与对齐统计
-
-| 维度 | 量化数据 / 当前成果 | 说明与状态 |
-|---|---|---|
-| **协议与服务端兼容** | `0.3.7` / `R4` / `R5` / `0.3.DL-R1` (`0xFDE`) + `open.mp` | **143** 项声明式入站 RPC、**27** 项出站 RPC 及完整双向同步包；已通过现网服与自建 `open.mp` 测试服实机验证（不含 0.3.DL 自定义模型下载） |
-| **联机广度对齐（T01–T36）** | **34 项真机/模拟器实测通过** | 地基重构 `F01–F08` 收官；覆盖菜单、选人、击杀榜、伤害/子弹/拖车/未占用同步、Object UV 动画与材质文本、越界地图碰撞等 |
-| **深度行为对齐与 5 路复审** | **59 项深层行为缺陷 + 5 路严格工程复审** | 涵盖战斗/瞄准、`weapon-config` 兼容、反作弊雷区（防警车刷枪/跳机送伞/假动画）、载具与火车状态机、安全边界与跨线程 UAF 清零（双 ABI 编译与单测通过，待统一实机验收） |
-| **双 ABI 引擎符号与钩子审计** | **505 / 505** 符号零缺失 · **135** 处 `DECL_HOOK` 零 ABI 截断 | 静态核对 `libGTASA.so` v2.10（arm64 `21,652` / arm32 `21,721` 导出符号），遗留裸字符串查表与裸偏移 **0 处** |
-| **桌面端协议与对拍单测** | **18 / 18** 通过（~0.14 s） | 脱离引擎独立编译，覆盖协议编解码、录包格式及与 `open.mp` 上游源码的双向字节级对拍 |
-| **核心游戏数据对齐** | **212 × 6** 合法改件表 · **1,812** 项动画索引 | 车辆改件合法表与 `open.mp` 逐位核验一致；动画表完整对齐至 `SAMP:FISHINGIDLE` |
-
-### 实机实测表现与移动端特性（红米 K50 arm64 + 雷电模拟器 14）
-
-- **启动器流畅度优化**：设置页拆分为 9 块分片预热，红米 K50 Debug 包实测主线程峰值阻塞从 **~630 ms 降至 ~127 ms**（单面板构建 `17–112 ms`）；游戏运行于独立 `:game` 进程，支持 `/q` 秒退与干净二次进服。
-- **五合一模组生态同屏共存**：**原生 ModLoader + AML + JPatch + MonetLoader（Lua / mimgui）+ 原生双 ABI CLEO** 实机同屏实测通过，已解决 `NVEventAppMain` / `GameMain` 跨线程并发踩踏、Android 14 TBI 与触控链透传问题。
-- **内置零污染虚拟 `models.img` 与资产编译**：原生 ModLoader 支持散装 `.dff/.ifp/.col/.ipl` 自动打包并缓存虚拟 `models.img`（**0 ms** 缓存命中，不污染原版 `gta3.img`）；高精自定义皮肤（RGBA8888 贴图）在红米 K50 实机联机实测 **45.9 FPS** 零崩稳定运行；启动器内置图片与 PC `.txd` 转换向导。
-- **精简包与重度自定义服兼容**：兼容 **~1.04 GB** 精简数据包（无 `.osw` 音频防崩、9 组 `texdb` 自动格式识别），支持越界地图（`|x| > 3000`）死区重映射碰撞与强制渲染、完整 Object 参数化 UV 动画（`0x1c0`/`0x1c1`）与无损游戏内截图（经 `emu_glReadPixels` 规避黑屏）。
-- **1080p 中文渲染与 Android 12+ 输入法适配**：修复高分屏 GBK 字库图集超限挤压乱码与系统 `Untrusted touch due to occlusion` 导致的软键盘不可点击问题，支持游戏内多指/三指防卡缩放触控战斗。
-
-> **状态透明度**：所有模块的「真机已验 (`✅`) / 仅编译待测 (`🟡`)」状态与已知限制均实时公开记录于 [docs/STATUS.md](docs/STATUS.md)、[docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) 与 [docs/BEHAVIORAL-PARITY-AUDIT.md](docs/BEHAVIORAL-PARITY-AUDIT.md)（目前 32 位 `armeabi-v7a` 仅完成双 ABI 编译与符号核验，尚无 32 位真机运行数据；`AudioStream` 原生暂仅支持 `http://`）。
-
-本项目不定期维护更新，坚持完全开放与透明，不含任何隐藏逻辑或私有功能；仓库内不包含任何游戏资源与商业字体，运行时文件均由用户从个人游戏拷贝中自行提取。欢迎自由构建、修改与 Fork，衍生版本需遵循相同的 **GNU GPL v3.0** 协议开源。如在使用中发现问题，欢迎提交 Issue 反馈。
+不定期维护更新，将一直保持开放、透明，给大家提供安全、稳定、好用的联机器，任何人都可以拿去构建、修改、fork，但衍生版本也须以同样条款开源，仓库不含任何游戏资源与商用字体，运行文件由用户本人的游戏中提取。没有任何隐藏、内部功能。
 
 ---
 
-## 资源准备
+## 需要准备的资源总览
 
-出于版权合规要求，本仓库仅提供源码与开源依赖。从零构建并运行客户端前，请先准备以下外部资源：
+出于版权合规要求，本仓库**仅包含源码与开源依赖**，不分发任何 Rockstar 专有二进制、游戏数据包或商业字体。自行编译并运行完整客户端前，请先准备以下外部资源：
 
-| 资源 | 说明 | 是否必需 | 放置 / 使用方式 |
+| 资源 | 用途 | 是否必需 | 使用方式 |
 |---|---|---|---|
-| **GTA:SA Android v2.10 安装包** | 提取 `libGTASA.so`、`libImmEmulatorJ.so` 及轻量 APK 资产（支持标准 ~26 MB APK、Split APK 及 2 GB+ 整合 APK，脚本会自动跳过大资源） | 编译 APK 必需 | 安装到手机后执行 `prepare_gtasa.py --from-adb`，或把 APK 放进 `dist/` 并让文件名以 `gtasa` 开头（如 `gtasa_2.10_arm64.apk`），执行一次 `prepare_gtasa.py`（命名规则见下文「提取 GTA:SA v2.10 运行时文件」） |
-| **GTA:SA Android v2.10 游戏数据** | 提供 ~2.4 GB 单机基础地图、模型、动画与贴图（普通 ~26 MB APK 不含此数据，需配 `.obb`；`.xapk`/`.apks` 先解压） | 构建数据包必需 | 将 `main`/`patch` `.obb`（或 2 GB+ 完整 `.apk`）直接放入根目录 `dist/`，脚本按 `main` → `patch` 自动识别 |
-| **PC 版 GTA:SA + SA-MP 0.3.7** | 提供 `SAMP.img`、`SAMP.ide`、`SAMPCOL.img` 与 PC TextDraw 贴图（无需第三方手机整合包） | 构建数据包必需 | 执行 `build_gamedata.py` 时通过 `--pc-samp` 指定本机安装目录 |
-| **开源中文字体**（如 Noto Sans SC） | 生成 `SAMP/fonts/chinese.ttf` 以支持中文显示 | 可选（中文服推荐） | 放入 `dist/` 并命名为含 `font` 的字体文件（支持 `.ttf` / `.ttc` / `.otf`），省略则回退为自带 Roboto |
+| **GTA:SA Android v2.10 安装包**（~26 MB 标准 APK、Split APK，或 2 GB+ 免 OBB 完整整合 APK） | 提取 `libGTASA.so`、`libImmEmulatorJ.so` 及原版 APK 内置轻量资产（传入 2 GB+ 完整 APK 时会自动跳过大资源，不会撑爆安装包） | 编译可运行 APK 必需 | 传给 `tools/prepare_gtasa.py --apk`（或用 `--from-adb` 从已安装单机版的设备拉取） |
+| **GTA:SA Android v2.10 完整游戏数据**（配套 `main`/`patch` `.obb`、2 GB+ 含资源完整 `.apk`，或已解包 `files/` 目录） | 提取单机版 ~2.4 GB 的地图、模型、动画、配置与基础贴图库（普通 ~26 MB APK 不含这些资源，必须配 `.obb`；若已是 2 GB+ 免 OBB 完整 APK，则同一份 APK 即可直接复用于此步；`.xapk`/`.apks` 先解压即可） | 构建手机端 `files/` 数据包必需 | 传给 `tools/build_gamedata.py --gtasa`（支持同时传入多个 `.obb` / `.apk`） |
 
-> **关于 GTA:SA Android v2.10 的说明：**
-> - Google Play 现已更新至 v2.11+，底层内存布局与本客户端不兼容，请务必使用 **v2.10**。
-> - `tools/prepare_gtasa.py` 会自动识别并剥离常见 v2.10 补丁包中的 Fastman92 注入（`libFastman92pluginLoader.so`），还原原版 `JNI_OnLoad`/`JNI_OnUnload`。
-> - 这类补丁包还把 `libGTASA.so` 内部的「程序头表」挪到了文件末尾。真机能正常加载，但 x86 模拟器（雷电等）加载这种库会立刻崩溃，表现为进游戏瞬间闪退。脚本提取时会自动把它挪回标准位置，不需要额外操作。官方原版的 `libGTASA.so` 没有这个问题，脚本不会改动它。
-> - **如果 `libGTASA.so` 是 2026-11-23 之前提取的**（那时脚本还没有上面这一步），在模拟器上会闪退。重新执行一次提取、再重新编译即可。
-> - 若安装包仅含 64 位 `arm64-v8a`（缺少 32 位 `armeabi-v7a`），现代 64 位手机仍可直接编译运行，构建校验仅作提示不会拦截。
+> **手里没有独立 APK 文件？** 只要游戏已安装且能在手机上跑通，插上 USB 开启调试后执行
+> `python tools/pull_gamedata_from_device.py --pc-samp "D:/GTASA"`
+> 即可自动完成「拉 APK → 提取 `libGTASA.so` → 找 `obb`/`Android/data` 数据 → 生成 `files/`」全流程，
+> 不需要任何下载器或第三方整合包。详见 `tools/README.md`。
+>
+> 若手里的是**第三方整合包**（包名不是 `com.rockstargames.gtasa`），或构建后进游戏闪退/无声/中文方块，
+> 直接看 [`PHONE_BOOTSTRAP.md`](PHONE_BOOTSTRAP.md) —— 那里记录了实测走通的完整命令，以及
+> `main.scm` 必须替换（否则 SIGSEGV）、音频必须补全、`adb push` 到 `Android/data` 的绕行方案等四个坑。
+| **PC 版 GTA:SA + 官方 SA-MP 0.3.7** 安装目录 | 提供 `SAMP/SAMP.img`、`SAMP.ide`、`SAMPCOL.img` 与 PC TextDraw 贴图 | 构建手机端 `files/` 数据包必需 | 传给 `tools/build_gamedata.py --pc-samp`（无需第三方手机整合包） |
+| **开源中文字体 `.ttf`**（如 Noto Sans SC） | 生成 `SAMP/fonts/chinese.ttf` 以显示中文聊天/文本 | 可选（中文服建议准备） | 传给 `tools/build_gamedata.py --cjk-font`（省略时默认使用仓库自带的 Roboto） |
 
 ---
 
-## 编译环境
+## 编译环境要求
 
-| 工具 / 组件 | 版本要求 | 说明 |
+| 工具 / 组件 | 要求版本 | 说明 |
 |---|---|---|
-| **JDK** | **17 – 21**（推荐 JDK 21） | Gradle 8.13 不支持 JDK 25+（会报 `major version 69`） |
+| **JDK** | **17 – 21**（推荐 JDK 21 / Android Studio 内置 JBR） | Gradle 8.13 不支持 JDK 25+（会报 `Unsupported class file major version 69`） |
 | **Android SDK** | `compileSdk 35` / `targetSdk 35` / `minSdk 24` | 需安装 Platform 35 与 Build-Tools 35 |
-| **Android NDK** | **`25.1.8937393`** | 已在 `app/build.gradle` 中固定 |
-| **CMake** | **`3.22.1`**（或兼容版本） | 可通过 Android Studio SDK Manager 安装 |
-| **Gradle** | **8.13**（仓库自带 Wrapper） | 无需全局安装 |
-| **Python 3** | 3.10+ | 运行 `tools/` 脚本；`build_gamedata.py` 需安装 `numpy` |
+| **Android NDK** | **`25.1.8937393`** | 已在 `app/build.gradle` 中固定版本 |
+| **CMake** | **`3.22.1`**（或兼容版本） | 可在 Android Studio SDK Manager 中安装 |
+| **Gradle** | **8.13**（仓库自带 Wrapper） | 无需手动安装全局 Gradle |
+| **Python 3** | 3.10+ | 运行 `tools/` 下脚本；其中 `build_gamedata.py` 需额外安装 `numpy` |
 
 ---
 
-## 构建与部署流程
+## 构建步骤
 
 ### 1. 克隆仓库并配置 `local.properties`
 
@@ -82,117 +59,39 @@ cd samp-mobile
 cp local.properties.example local.properties
 ```
 
-在 `local.properties` 中填入本机 Android SDK 路径（用 Android Studio 打开工程会自动生成）：
+编辑 `local.properties`，填入本机 Android SDK 路径（用 Android Studio 打开项目也会自动生成）：
 
 ```properties
-# Windows
+# Windows 示例
 sdk.dir=C\:\\Users\\<YourUser>\\AppData\\Local\\Android\\Sdk
 
-# macOS / Linux
+# macOS / Linux 示例
 # sdk.dir=/Users/<YourUser>/Library/Android/sdk
 ```
 
-### 2. 提取 GTA:SA v2.10 运行时文件
+### 2. 提取 GTA:SA Android v2.10 运行时文件
 
-这一步把 GTA:SA v2.10 安装包里的原生库和轻量资产提取到工程里（目标路径已加入 `.gitignore`）。
-
-#### 最简单的做法
-
-1. 把 GTA:SA v2.10 的 APK 放进仓库根目录的 `dist/` 文件夹。
-2. 把文件名改成以 `gtasa` 开头（规则见下）。
-3. 在仓库根目录执行一次：
+使用内置脚本提取 Rockstar 专有库与 APK 资产（提取目标路径均已在 `.gitignore` 中排除）：
 
 ```bash
-python tools/prepare_gtasa.py
-```
+# 方式 A：从本地 APK 文件或 Split-APK 目录提取
+python tools/prepare_gtasa.py --apk /path/to/gtasa_2.10.apk
 
-不管 `dist/` 里有一个还是多个 APK，**都只执行这一次**，不要每个 APK 各执行一遍。
-
-#### APK 命名规则
-
-脚本不带参数运行时，按下面的规则自动找 APK：
-
-| 规则 | 说明 |
-|---|---|
-| 位置 | 必须直接放在 `dist/` 下，子文件夹里的不会被找到 |
-| 扩展名 | 必须是 `.apk`（`.xapk`、`.apks` 要先解压出里面的 `.apk`） |
-| 文件名 | 必须以 `gtasa` 开头，大小写都可以；后面写什么随意 |
-| 数量 | 不限，所有符合条件的 APK 会在同一次运行里一起处理 |
-
-例子：
-
-| 文件名 | 能否被找到 |
-|---|---|
-| `dist/gtasa_2.10.apk` | 能 |
-| `dist/gtasa_2.10_arm64.apk`、`dist/gtasa_2.10_arm32.apk` | 能，两个一起处理 |
-| `dist/GTASA-v2.10.apk` | 能（不区分大小写） |
-| `dist/GTA SA v2.10 64-bit.apk` | 不能（开头是 `GTA SA`，中间有空格，不是 `gtasa`） |
-| `dist/apk/gtasa_2.10.apk` | 不能（在子文件夹里） |
-
-`dist/` 里的其他文件（`.obb`、`gamedata.zip`、字体等）不受影响，脚本不会碰。
-
-文件名里的 `arm64`、`arm32` 只是给人看的，脚本不靠文件名判断位数，而是打开 APK 看里面有哪个位数的库。
-
-#### 有两个 APK（32 位和 64 位分开）时
-
-有些安装包把 32 位和 64 位分成两个 APK。两个都放进 `dist/` 并按规则命名，然后执行一次脚本即可，两个位数的库都会被提取。
-
-- 多个 APK 按文件名的字母顺序依次处理。
-- 同一个库在多个 APK 里都有时，用最先遇到的那个，后面的跳过。
-- 资产（`assets`）是合并的：同名文件以排在后面的 APK 为准。
-- 只有 64 位的 APK 也可以，现代 64 位手机够用；这时脚本会提示缺少 32 位的库，可以忽略。
-
-#### 其他提取方式
-
-```bash
-# 手动指定 APK 或 Split-APK 目录（文件名不受上面规则限制；多个 APK 写在同一条命令里）
-python tools/prepare_gtasa.py --apk dist/gtasa_2.10_arm32.apk dist/gtasa_2.10_arm64.apk
-
-# 手机上已装好 GTA:SA v2.10（无需导入单机数据包），连接 ADB 直接从手机提取
+# 方式 B：从已安装 com.rockstargames.gtasa 的 ADB 设备/模拟器直接拉取
 python tools/prepare_gtasa.py --from-adb
 
-# 清理本地提取的专有文件（含下面提到的备份）
+# 如需清理本地提取的专有文件
 python tools/prepare_gtasa.py --clean
 ```
 
-#### 脚本提取时做了什么
-
-1. 把 `libGTASA.so`（以及 32 位的 `libImmEmulatorJ.so`）放到 `app/src/main/jniLibs/<ABI>/`。
-2. 如果 `libGTASA.so` 来自带 Fastman92 补丁的安装包：去掉它的加载器注入，并把程序头表挪回标准位置（后者是为了能在 x86 模拟器上运行，原因见上面「关于 GTA:SA Android v2.10 的说明」）。
-3. 把 APK 里的轻量资产放到 `app/src/main/assets/`。这一步会**先清空**该目录里原有的提取内容再重新写入。
-
-可选参数 `--libs-only`：只做前两件事，不动 `app/src/main/assets/`。适用于资产已经提取过、只想更新原生库的情况。它可以和上面任何一种方式一起用：
-
-```bash
-python tools/prepare_gtasa.py --libs-only
-```
-
-其他行为：
-
-- 提取出的库与 `jniLibs` 里现有的完全相同时不会重写；不同时先把旧文件备份到 `build/gtasa-backup/<ABI>/` 再替换。
-- 提取完要重新编译 APK（下一步）才会生效。
-
-#### 常见问题
-
-- **提示 `No APK given and no dist/gtasa*.apk found`**：`dist/` 里没有符合命名规则的 APK，对照上面的表检查位置、扩展名和文件名开头。
-- **提示 `No lib/arm64-v8a/libGTASA.so or lib/armeabi-v7a/libGTASA.so found`**：这个 APK 里没有游戏库，通常是拿错了文件（例如只是一个安装器外壳，或 Split APK 里的非 ABI 分包）。
-- **提示 `WARNING: SHA-256 differs from verified v2.10`**：这个库和已核对过的官方 v2.10 不完全一样。带补丁的安装包会出现这条提示，一般不影响使用；如果进游戏后异常，换一个来源的 v2.10 安装包。
-- **模拟器上进游戏瞬间闪退**：`libGTASA.so` 是用旧版脚本提取的。重新执行一次提取，再重新编译。
-
 ### 3. 编译 APK
 
-Debug 包无需签名配置或 `google-services.json`，产物输出至 `app/build/outputs/apk/debug/samp.apk`：
+**Debug 包**（无需任何签名配置或 `google-services.json`）：
 
 ```powershell
-# Windows (PowerShell) — 若默认 JDK >= 25，先指定 JDK 17–21
+# Windows (PowerShell) — 若系统默认 JDK >= 25，先指定 JDK 17–21
 # $env:JAVA_HOME = "C:\Path\To\jdk-21"
 .\gradlew.bat assembleDebug
-```
-
-```cmd
-:: Windows (CMD)
-set JAVA_HOME=C:\Path\To\jdk-21
-gradlew.bat assembleDebug
 ```
 
 ```bash
@@ -200,78 +99,82 @@ gradlew.bat assembleDebug
 ./gradlew assembleDebug
 ```
 
-> 仅做源码/C++ 干跑编译检查（未提取 GTA:SA 文件）时可加 `-PskipGtasaCheck=true`。
->
-> - **Release 签名（可选）**：在 `local.properties` 或环境变量中配置 `SAMP_STORE_FILE`、`SAMP_STORE_PASSWORD`、`SAMP_KEY_ALIAS`、`SAMP_KEY_PASSWORD` 后执行 `./gradlew assembleRelease`（切勿提交密钥文件）。
-> - **Firebase Crashlytics（可选）**：参考 `app/google-services.json.example` 放置 `app/google-services.json` 即可自动启用，默认关闭。
+输出路径：`app/build/outputs/apk/debug/samp.apk`。（若仅做源码/C++ 编译检查而不打包完整运行包，可加 `-PskipGtasaCheck=true`。）
 
-### 4. 生成数据包（`.zip`）并在启动器一键导入
+**Release 包（可选）**：在 `local.properties` 或环境变量中提供签名信息（切勿提交密钥文件）：
 
-1. 将 GTA:SA v2.10 的 `main`/`patch` `.obb`（或 2 GB+ 完整 `.apk`）放入仓库根目录 `dist/`；
-2. （可选）将中文字体（如 `font.ttf` / `font.ttc` / `font.otf`）放入 `dist/`；
-3. 指定已安装 **SA-MP 0.3.7** 的 PC 版 GTA:SA 目录，执行一条命令即可自动生成 `dist/gamedata.zip`：
-
-```bash
-python tools/build_gamedata.py --pc-samp "D:\Program Files (x86)\Rockstar Games\GTA San Andreas"
+```properties
+SAMP_STORE_FILE=path/to/your-release.jks
+SAMP_STORE_PASSWORD=your_store_password
+SAMP_KEY_ALIAS=your_key_alias
+SAMP_KEY_PASSWORD=your_key_password
 ```
 
-> 可选参数：`--gtasa`（手动指定 OBB/APK 路径）、`--cjk-font`（手动指定字体）、`--out`（默认 `dist/gamedata.zip`，传目录路径则输出散文件夹）、`--keep-audio`（保留完整音频）、`--scm-dir`（替换脚本）。
+然后执行 `./gradlew assembleRelease`。
 
-**手机端一键导入：**
-1. 将 `dist/gamedata.zip` 复制到手机任意目录（如 `Download/`），无需手动操作 `Android/data/`；
-2. 安装并打开 `SA-MP Mobile`，在 **设置 → 联机 → 一键导入 .zip**（或点击进服时按弹窗提示）选择该文件；
-3. 启动器会自动流式解压至自身 `files/` 目录，同时保留已有 `settings.json` 与服务器列表，彻底规避 Android 14 目录权限与层级错位问题。
+**Firebase Crashlytics（可选）**：默认不启用。如需接入自己的 Firebase 项目，参考 `app/google-services.json.example` 放置 `app/google-services.json`，构建脚本会自动检测并启用相关插件。
 
-### 5. 自定义启动器背景（可选）
+### 4. 构建手机端精简游戏数据包
 
-把一张横向图片命名为 `launcher_backdrop.jpg`（`.png` / `.webp` 亦可）放进 `app/src/main/res/drawable-nodpi/` 后重新编译，即替换默认渐变背景；删除该文件即恢复默认。
+准备好 GTA:SA 2.10 完整数据与 PC 版 SA-MP 0.3.7 目录后，运行：
 
-- 建议尺寸 **2400×1080**（20:9），其他比例按居中裁切铺满；画面最左侧约 1/10 会被导航栏盖住，主体别放在那里。
-- 文件名必须全小写且只留一份（同目录不能同时存在两种扩展名）。
-- 图片上方叠有一层压暗遮罩与半透明面板以保证文字可读，透明度在 `res/values/colors.xml` 的 `ui_backdrop_scrim`（遮罩）与 `ui_glass`（面板）调整。
+```bash
+# 情况 A：标准拆分版（传入 main/patch .obb，若缺少 data/ 可一并传入小 .apk）
+python tools/build_gamedata.py \
+  --gtasa /path/to/main.obb /path/to/patch.obb \
+  --pc-samp "/path/to/GTA San Andreas" \
+  --cjk-font /path/to/NotoSansSC-Regular.ttf \
+  --out dist/gamedata/files
 
----
+# 情况 B：2 GB+ 免 OBB 完整单文件 APK（与步骤 2 共用同一份 .apk）
+python tools/build_gamedata.py \
+  --gtasa /path/to/gtasa_2.10_full.apk \
+  --pc-samp "/path/to/GTA San Andreas" \
+  --cjk-font /path/to/NotoSansSC-Regular.ttf \
+  --out dist/gamedata/files
+```
 
-## 本地自动校验与测试
-
-不依赖真机或模拟器即可执行以下验证：
-
-- **双 ABI 编译期布局守卫**：`app/src/main/cpp/SAMPMOBILE/AbiGuards.cpp` 在编译 `arm64-v8a` / `armeabi-v7a` 时校验指针宽度、RakNet 类型、SA-MP 同步包大小及 GTA:SA 核心引擎结构体布局。
-- **双 ABI 引擎符号严格审计**：`python tools/check_symbols.py --strict-audit` 核对 `Symbols.def` 全部 505 项符号在 `arm64-v8a` / `armeabi-v7a` 的 `libGTASA.so` 导出表中的存在性与类型，并拦截裸字符串查表与裸偏移。
-- **协议层与 `open.mp` 上游对拍单测**（WSL / Linux）：`sh tests/proto/run.sh`（18 项 C++ 单元测试，覆盖协议基元、录包格式及与 `open.mp` 官方收发包逻辑的对拍）。
-- **JUnit 单元测试**：`./gradlew testDebugUnitTest`
-- **跨平台静态与产物自检**（仅依赖 Python 3 标准库）：
-
-  ```bash
-  # 校验开源仓库状态
-  python tools/selfcheck.py
-
-  # 校验完整提取与双 ABI 打包产物
-  python tools/selfcheck.py --require-gtasa --require-apk
-  ```
+脚本会自动完成以下处理，输出可直接放入应用 `files/` 目录的精简数据包（默认约 1.05 GB，不含音频流）：
+- 从官方 GTA:SA 2.10 提取单格式（ETC / PVR）基础贴图库、模型、动画与配置；
+- 将 PC 版 `SAMP/SAMP.img` 自动拆分为移动版模型包 `texdb/samp.img` 与带完整 Mipmap 链、大小写别名的贴图库 `texdb/samp/`；
+- 从 PC 版 `models/txd/` 等提取 TextDraw 贴图到 `texdb/samp_extra/`；
+- 生成最小空白 `SAMP/main.scm`、空 `SAMP/script.img` 与开源字体（如需保留原版音频可加 `--keep-audio`，如需替换脚本可加 `--scm-dir`）。
 
 ---
 
-## 界面预览
+## 零设备自动校验与单元测试
 
-![模组与补丁管理](images/1.jpg)
+不连接真机或模拟器即可运行以下本地校验：
 
-![游戏设置与自定义主题](images/2.jpg)
+1. **双 ABI 编译期结构体校验**：`app/src/main/cpp/SAMPMOBILE/AbiGuards.cpp` 在编译 `arm64-v8a` / `armeabi-v7a` 时校验指针宽度、RakNet 类型、SA-MP 同步包结构体大小及 GTA:SA 核心引擎字段偏移。
+2. **JUnit 单元测试**：
 
-![截图库与实机画面](images/3.jpg)
+   ```bash
+   ./gradlew testDebugUnitTest
+   ```
+
+3. **Python 静态与产物自检**（仅依赖 Python 3 标准库）：
+
+   ```bash
+   # 仅校验开源仓库状态（无需提前提取 GTA:SA 专有文件）
+   python tools/selfcheck.py
+
+   # 提取并编译后校验完整产物
+   python tools/selfcheck.py --require-gtasa --require-apk
+   ```
 
 ---
 
 ## 常见问题
 
-- **报错 `Unsupported class file major version 69`**：当前 `JAVA_HOME` 为 JDK 25+，请切换至 JDK 17–21 后重新构建。
-- **Android 14+ 加载 AML / MonetLoader 异常**：请保留 `app/build.gradle` 中的 `useLegacyPackaging = true` 与 `AndroidManifest.xml` 中的 `android:allowNativeHeapPointerTagging="false"`。
-- **首次拉取 Gradle 依赖较慢**：`settings.gradle` 已在官方源后配置镜像回退。
+- **报错 `Unsupported class file major version 69`**：当前 `JAVA_HOME` 指向了 JDK 25+，请切换到 JDK 17–21 后重试。
+- **Android 14+ 加载 AML / MonetLoader 异常**：`app/build.gradle` 已配置 `packaging.jniLibs.useLegacyPackaging = true`，且 `AndroidManifest.xml` 已设置 `android:allowNativeHeapPointerTagging="false"`，请勿移除。
+- **首次下载 Gradle 依赖较慢**：`settings.gradle` 已在官方仓库之后配置镜像回退。
 
 ---
 
 ## 许可证与免责声明
 
-本项目原始及修改代码采用 **GNU General Public License v3.0** 开源发布，协议全文见 [LICENSE](LICENSE)，第三方组件许可证清单见 [third_party/licenses/THIRD_PARTY_NOTICES.md](third_party/licenses/THIRD_PARTY_NOTICES.md)。
+本项目原始及修改代码采用 **GNU General Public License v3.0** 开源发布，完整协议见 [LICENSE](LICENSE)，第三方组件许可证清单与原文见 [third_party/licenses/](third_party/licenses/THIRD_PARTY_NOTICES.md)。
 
-本项目基于开源的 Alyn SA-MP Mobile 架构继续开发，保留原有文件归属声明。本项目与 Rockstar Games、Take-Two Interactive 或 SA-MP 官方团队无任何关联，不分发任何 Rockstar 专有二进制、游戏数据包或商业字体，详情见 [NOTICE](NOTICE)。
+本项目基于开源的 Alyn SA-MP Mobile 架构继续开发，保留原有文件归属声明。本项目与 Rockstar Games、Take-Two Interactive 或 SA-MP 官方团队无任何关联，不分发任何 Rockstar 专有二进制、游戏数据包或商业字体，详情请参阅 [NOTICE](NOTICE)。

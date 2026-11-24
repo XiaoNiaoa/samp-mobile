@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="format-detection" content="telephone=no,email=no,address=no">
+<title>物资商店</title>
+<style>
+  :root{
+    --gold:#d8b46a;
+    --gold-dim:rgba(216,180,106,.28);
+    --bg:rgba(13,15,17,.94);
+    --card:rgba(255,255,255,.045);
+    --line:rgba(255,255,255,.085);
+    --text:#e9e6df;
+    --muted:#8e8b84;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:transparent;               /* 关键：露出下面的游戏画面 */
+    color:var(--text);
+    font-family:-apple-system,"PingFang SC","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+    font-size:14px;
+    line-height:1.45;
+    user-select:none;
+    -webkit-user-select:none;
+    overflow:hidden;
+    touch-action:manipulation;
+  }
+
+  .panel{
+    position:fixed;inset:0;
+    display:flex;flex-direction:column;
+    background:
+      radial-gradient(120% 80% at 50% -10%,rgba(216,180,106,.10),transparent 60%),
+      linear-gradient(180deg,rgba(22,25,28,.96),var(--bg));
+    border:1px solid var(--line);
+    border-radius:18px;
+    overflow:hidden;
+    padding:calc(env(safe-area-inset-top,0px) + 12px)
+            calc(env(safe-area-inset-right,0px) + 14px)
+            calc(env(safe-area-inset-bottom,0px) + 10px)
+            calc(env(safe-area-inset-left,0px) + 14px);
+  }
+
+  header{display:flex;align-items:flex-start;gap:12px;flex:0 0 auto;}
+  .title{font-size:17px;font-weight:600;letter-spacing:.14em;color:var(--gold);}
+  .sub{font-size:11px;color:var(--muted);letter-spacing:.06em;margin-top:2px;}
+  .close{
+    margin-left:auto;width:34px;height:34px;flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+    color:var(--muted);font-size:15px;line-height:1;
+  }
+  .close:active{background:rgba(255,255,255,.12);color:#fff;}
+
+  .chips{display:flex;gap:8px;margin:10px 0 8px;flex:0 0 auto;overflow-x:auto;scrollbar-width:none;}
+  .chips::-webkit-scrollbar{display:none;}
+  .chip{
+    padding:5px 12px;border-radius:999px;font-size:12px;color:var(--muted);
+    background:var(--card);border:1px solid var(--line);white-space:nowrap;
+  }
+  .chip.on{color:#171a1c;background:var(--gold);border-color:var(--gold);font-weight:600;}
+
+  .grid{
+    flex:1 1 auto;overflow-y:auto;overscroll-behavior:contain;
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));
+    grid-auto-rows:max-content;
+    align-content:start;
+    gap:8px;padding:2px 2px 6px;
+    -webkit-overflow-scrolling:touch;
+  }
+  .grid::-webkit-scrollbar{width:0;}
+
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:10px 10px 9px;display:flex;flex-direction:column;gap:6px;
+    position:relative;overflow:hidden;
+  }
+  .card:before{
+    content:"";position:absolute;left:0;top:0;bottom:0;width:2px;
+    background:linear-gradient(180deg,var(--gold),transparent);
+    opacity:.55;
+  }
+  .name{font-size:13.5px;font-weight:600;}
+  .desc{font-size:11px;color:var(--muted);min-height:2.6em;}
+  .row{display:flex;align-items:center;gap:8px;margin-top:auto;}
+  .price{font-size:12.5px;color:var(--gold);font-variant-numeric:tabular-nums;}
+  .buy{
+    margin-left:auto;padding:6px 11px;border-radius:8px;
+    background:rgba(216,180,106,.14);border:1px solid var(--gold-dim);
+    color:var(--gold);font-size:12px;font-weight:600;
+  }
+  .buy:active{background:var(--gold);color:#171a1c;}
+  .buy.done{background:rgba(88,190,120,.18);border-color:rgba(88,190,120,.4);color:#7fdca0;}
+
+  footer{
+    flex:0 0 auto;display:flex;align-items:center;gap:10px;
+    margin-top:8px;padding-top:8px;border-top:1px solid var(--line);
+    font-size:11px;color:var(--muted);
+  }
+  #env{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #bal{margin-left:auto;color:var(--gold);font-variant-numeric:tabular-nums;}
+
+  #toast{
+    position:fixed;left:50%;bottom:64px;transform:translateX(-50%) translateY(8px);
+    background:rgba(0,0,0,.72);border:1px solid var(--line);border-radius:999px;
+    padding:7px 16px;font-size:12px;color:#fff;opacity:0;pointer-events:none;
+    transition:opacity .18s,transform .18s;white-space:nowrap;max-width:80%;
+    overflow:hidden;text-overflow:ellipsis;
+  }
+  #toast.on{opacity:1;transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+<div class="panel">
+  <header>
+    <div>
+      <div class="title">物 资 商 店</div>
+      <div class="sub">安全区交易 · 仅限手机端覆盖层</div>
+    </div>
+    <button class="close" id="close" aria-label="关闭">✕</button>
+  </header>
+
+  <div class="chips" id="chips"></div>
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    <span id="env">standalone</span>
+    <span id="bal">余额 --</span>
+  </footer>
+</div>
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // 与服务端 webview_test.inc 的 WV_ItemID / WV_ItemPrice 一一对应（id 1..4）。
+  // 价格只是占位，真正结算用服务端下发的 p 数组覆盖，客户端改价无效。
+  var ITEMS = [
+    { id: 1, name: '绷带',        cat: '医疗', desc: '快速止血，野外必备',        price: 40  },
+    { id: 2, name: '急救包',      cat: '医疗', desc: '大幅回血，重伤保命',        price: 120 },
+    { id: 3, name: '9mm 弹药 x30', cat: '弹药', desc: '手枪通用，一次 30 发',      price: 15  },
+    { id: 4, name: '工具箱',      cat: '补给', desc: '修车 / 修建筑两用',         price: 260 }
+  ];
+
+  var data = {};          // show(url, json) 传进来的上下文
+  var filter = '全部';
+
+  var $grid  = document.getElementById('grid');
+  var $chips = document.getElementById('chips');
+  var $env   = document.getElementById('env');
+  var $bal   = document.getElementById('bal');
+  var $toast = document.getElementById('toast');
+  var toastTimer = 0;
+
+  function hasBridge() { return typeof window.samp !== 'undefined'; }
+
+  function toast(msg) {
+    $toast.textContent = msg;
+    $toast.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { $toast.classList.remove('on'); }, 1600);
+  }
+
+  function send(cmd) {
+    if (hasBridge()) { window.samp.command(cmd); }
+    else { toast('浏览器预览：' + cmd); }
+  }
+
+  function money(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function renderChips() {
+    var cats = ['全部'];
+    ITEMS.forEach(function (it) { if (cats.indexOf(it.cat) < 0) cats.push(it.cat); });
+    $chips.innerHTML = '';
+    cats.forEach(function (c) {
+      var el = document.createElement('div');
+      el.className = 'chip' + (c === filter ? ' on' : '');
+      el.textContent = c;
+      el.addEventListener('click', function () { filter = c; renderChips(); renderGrid(); });
+      $chips.appendChild(el);
+    });
+  }
+
+  function renderGrid() {
+    $grid.innerHTML = '';
+    ITEMS.filter(function (it) { return filter === '全部' || it.cat === filter; })
+      .forEach(function (it) {
+        var card = document.createElement('div');
+        card.className = 'card';
+
+        var name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = it.name;
+
+        var desc = document.createElement('div');
+        desc.className = 'desc';
+        desc.textContent = it.desc;
+
+        var row = document.createElement('div');
+        row.className = 'row';
+
+        var price = document.createElement('div');
+        price.className = 'price';
+        price.textContent = '¥ ' + money(it.price);
+
+        var btn = document.createElement('button');
+        btn.className = 'buy';
+        btn.textContent = '购买';
+        btn.addEventListener('click', function () {
+          if (btn.classList.contains('done')) return;
+          send('/wvbuy ' + it.id);
+          btn.classList.add('done');
+          btn.textContent = '已提交';
+          toast('已提交：' + it.name);
+          setTimeout(function () {
+            btn.classList.remove('done');
+            btn.textContent = '购买';
+          }, 1400);
+        });
+
+        row.appendChild(price);
+        row.appendChild(btn);
+        card.appendChild(name);
+        card.appendChild(desc);
+        card.appendChild(row);
+        $grid.appendChild(card);
+      });
+  }
+
+  function renderEnv() {
+    if (!hasBridge()) { $env.textContent = 'standalone · 浏览器预览'; return; }
+    try {
+      var e = JSON.parse(window.samp.env());
+      // root: http = 从 files/web/ 走本地服务加载（可热更）；assets = APK 内置兜底
+      var parts = [(e.root === 'http' ? 'http' : 'assets'), 'android ' + e.sdk];
+      if (e.w && e.h) parts.push(e.w + 'x' + e.h);
+      parts.push((e.mode === 2 ? 'full' : 'panel'));
+      $env.textContent = parts.join(' · ');
+      if (typeof data.bal === 'number') {
+        $bal.textContent = '余额 ¥ ' + money(data.bal);
+      }
+    } catch (err) {
+      $env.textContent = 'bridge error';
+    }
+  }
+
+  function applyServerContext(json) {
+    try { data = (typeof json === 'string') ? JSON.parse(json) : (json || {}); }
+    catch (e) { data = {}; }
+    // 服务端下发的价格数组优先（服务端才是权威，改前端价格没用）
+    if (data.p && data.p.length) {
+      ITEMS = ITEMS.slice(0, data.p.length);
+      ITEMS.forEach(function (it, i) { it.price = data.p[i]; });
+      renderGrid();
+    }
+    renderEnv();
+  }
+
+  // Java 侧 show(url, json) 或 pushContext() 会调到这里
+  window.SampOverlay = {
+    onContext: applyServerContext,
+
+    // 服务端二次推送（SYNC 余额 / TOAST 提示）
+    onServerEvent: function (action, payload) {
+      var d = {};
+      try { d = (typeof payload === 'string') ? JSON.parse(payload) : (payload || {}); } catch (e) {}
+      if (action === 'SYNC') {
+        if (typeof d.bal === 'number') data.bal = d.bal;
+        renderEnv();
+        return;
+      }
+      if (action === 'TOAST') {
+        if (d.t === 1) toast('余额不足');
+        else if (d.t === 2) toast('背包放不下');
+        else toast('操作失败');
+      }
+    },
+
+    close: function () { if (hasBridge()) window.samp.close(); },
+    toast: toast
+  };
+
+  document.getElementById('close').addEventListener('click', function () {
+    if (hasBridge()) { window.samp.close(); } else { toast('浏览器预览：关闭'); }
+  });
+
+  renderChips();
+  renderGrid();
+  renderEnv();
+
+  // 通知原生：DOM 与 bridge 都好了，可以推 context 了
+  if (hasBridge()) {
+    try { window.samp.ready(); } catch (e) {}
+  }
+})();
+</script>
+</body>
+</html>

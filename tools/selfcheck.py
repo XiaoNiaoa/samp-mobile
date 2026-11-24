@@ -113,6 +113,11 @@ def read_text(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8", errors="replace")
 
 
+def enabled_abis() -> List[str]:
+    """ABIs actually built, read from android.defaultConfig.ndk.abiFilters.add("...")."""
+    return re.findall(r'abiFilters\.add\("([^"]+)"\)', read_text("app/build.gradle"))
+
+
 def check_compliance(r: Runner) -> None:
     for rel in ("LICENSE", "NOTICE", "third_party/licenses/THIRD_PARTY_NOTICES.md"):
         if (REPO_ROOT / rel).is_file():
@@ -154,10 +159,11 @@ def check_build_and_manifest(r: Runner) -> None:
     else:
         r.fail("Gradle jniLibs legacy packaging", "missing useLegacyPackaging = true (required for AML/MonetLoader on Android 14+)")
 
-    if '"armeabi-v7a"' in gradle and '"arm64-v8a"' in gradle:
-        r.ok("Gradle dual-ABI filter", "armeabi-v7a + arm64-v8a")
+    abis = enabled_abis()
+    if "arm64-v8a" in abis and set(abis) <= {"arm64-v8a", "armeabi-v7a"}:
+        r.ok("Gradle ABI filter", " + ".join(abis))
     else:
-        r.fail("Gradle dual-ABI filter", "both armeabi-v7a and arm64-v8a must be enabled")
+        r.fail("Gradle ABI filter", f"unexpected abiFilters {abis or 'none'} (arm64-v8a is mandatory)")
 
     if 'ndkVersion "25.1.8937393"' in gradle:
         r.ok("Gradle NDK version pinned", "25.1.8937393")
@@ -349,14 +355,17 @@ def check_jnilibs_elf(r: Runner, require_gtasa: bool) -> None:
     prop_present = 0
     prop_missing: List[str] = []
 
+    abis = enabled_abis()
     for abi, required in REPO_JNILIBS.items():
+        if abi not in abis:
+            continue
         abi_dir = jni_root / abi
         exp_class, exp_machine = ELF_EXPECTED[abi]
         for lib in required:
             if not (abi_dir / lib).is_file():
                 errors.append(f"missing {abi}/{lib}")
 
-        for plib in PROPRIETARY_JNILIBS[abi]:
+        for plib in PROPRIETARY_JNILIBS.get(abi, []):
             if (abi_dir / plib).is_file():
                 prop_present += 1
             else:
@@ -376,10 +385,11 @@ def check_jnilibs_elf(r: Runner, require_gtasa: bool) -> None:
                         f"{abi}/{so.name}: wrong ELF arch (class={ei_class}, machine={e_machine})"
                     )
 
+    label = "jniLibs ELF integrity (" + ", ".join(enabled_abis() or ["none"]) + ")"
     if not errors:
-        r.ok("Dual-ABI jniLibs ELF integrity", f"{total_checked} .so files verified")
+        r.ok(label, f"{total_checked} .so files verified")
     else:
-        r.fail("Dual-ABI jniLibs ELF integrity", "; ".join(errors))
+        r.fail(label, "; ".join(errors))
 
     if prop_present == 0:
         if require_gtasa:
@@ -443,7 +453,10 @@ def check_apk(r: Runner, apk_path: Path, required: bool, require_gtasa: bool) ->
         if base_entry not in names:
             missing.append(base_entry)
 
+    apk_abis = enabled_abis()
     for abi, libs in REPO_JNILIBS.items():
+        if abi not in apk_abis:
+            continue
         expected_libs = libs + ["libSAMPMOBILE.so", "libSCAnd.so"]
         if require_gtasa:
             expected_libs += PROPRIETARY_JNILIBS[abi]
@@ -454,7 +467,7 @@ def check_apk(r: Runner, apk_path: Path, required: bool, require_gtasa: bool) ->
 
     size_mb = apk_path.stat().st_size / (1024 * 1024)
     if not missing:
-        r.ok("APK artifact structure", f"{apk_path.name} ({size_mb:.2f} MB), dual-ABI + assets complete")
+        r.ok("APK artifact structure", f"{apk_path.name} ({size_mb:.2f} MB), {', '.join(apk_abis)} + assets complete")
     else:
         r.fail("APK artifact structure", "missing entries: " + ", ".join(missing))
 

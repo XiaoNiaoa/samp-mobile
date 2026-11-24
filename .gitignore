@@ -29,6 +29,9 @@ app/src/main/jniLibs/*/libGTASA.so
 app/src/main/jniLibs/*/libImmEmulatorJ.so
 app/src/main/assets/*
 !app/src/main/assets/monetloader_lib.zip
+# 2026-11-22: WebView 覆盖层的本地壳页是源码，不是解包出来的游戏资源
+!app/src/main/assets/web/
+!app/src/main/assets/web/**
 
 # OS & Temp files
 .DS_Store
@@ -46,3 +49,14 @@ GTA/
 gamefiles/
 gamefiles.tar
 dist/
+
+# CEF 测试基建的运行产物（截图 / 日志 / 录包），不入库
+tools/cef_kat/out/
+tools/cef_kat/out_*/
+
+# 从设备提取的二进制（受版权保护，禁止入库）
+tools/_so/
+
+# 编辑器 / 备份残留
+*.bak_wv
+*.bak_webview

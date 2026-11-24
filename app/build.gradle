@@ -26,15 +26,18 @@ android {
         applicationId "com.sampmobile.launcher"
         minSdk 24
         targetSdk 35
-        versionCode 10001
-        versionName "1.0.0.1"
+        versionCode 10000
+        versionName "1.0.0.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         ndkVersion "25.1.8937393"
 
         ndk {
-            abiFilters.add("armeabi-v7a")
+            // 只构建 64 位：手头的 libGTASA.so 来自手机端整合包，只带 arm64-v8a 一份。
+            // 若保留 armeabi-v7a 而缺对应的 libGTASA.so，32 位设备会在 dlopen 阶段崩溃。
+            // 需要 32 位支持时：把 "armeabi-v7a" 加回来，并先准备好
+            // jniLibs/armeabi-v7a/libGTASA.so（官方 2.10 的 ABI split APK）。
             abiFilters.add("arm64-v8a")
         }
     }
@@ -114,33 +117,23 @@ tasks.register("verifyGtasaAssets") {
             logger.lifecycle("Skipping GTA:SA proprietary asset check (-PskipGtasaCheck=true).")
             return
         }
-        def libArm64 = file("src/main/jniLibs/arm64-v8a/libGTASA.so")
-        def libArm32 = file("src/main/jniLibs/armeabi-v7a/libGTASA.so")
-        def assetIndex = file("src/main/assets/assetfile.txt")
-
-        def missing = []
-        if (!libArm64.isFile() && !libArm32.isFile()) {
-            missing << rootProject.relativePath(libArm64) + " (or " + rootProject.relativePath(libArm32) + ")"
-        }
-        if (!assetIndex.isFile()) {
-            missing << rootProject.relativePath(assetIndex)
-        }
+        // Only verify the ABIs we actually build: a 32-bit package without its own
+        // libGTASA.so would package fine and then crash on dlopen.
+        def abis = (android.defaultConfig.ndk.abiFilters ?: []).collect { it.toString() }
+        def required = abis.collect { file("src/main/jniLibs/${it}/libGTASA.so") } +
+                [file("src/main/assets/assetfile.txt")]
+        def missing = required.findAll { !it.isFile() }
         if (!missing.isEmpty()) {
-            def list = missing.collect { "  - " + it }.join("\n")
+            def list = missing.collect { "  - " + rootProject.relativePath(it) }.join("\n")
             throw new GradleException(
                     "Missing proprietary GTA:SA v2.10 runtime files (not distributed in this repository):\n" +
                     list + "\n\n" +
-                    "Pull from a connected device/emulator with GTA:SA v2.10 installed (recommended):\n" +
+                    "Extract them locally from your own GTA:SA Android v2.10 APK:\n" +
+                    "  python tools/prepare_gtasa.py --apk /path/to/gtasa_2.10.apk\n" +
+                    "Or pull from a connected device/emulator with GTA:SA installed:\n" +
                     "  python tools/prepare_gtasa.py --from-adb\n" +
-                    "Or extract locally from your own GTA:SA Android v2.10 APK:\n" +
-                    "  python tools/prepare_gtasa.py --apk dist/gtasa_2.10.apk\n" +
                     "(For compile-only dry runs without packaging a playable APK, pass -PskipGtasaCheck=true.)"
             )
-        }
-        if (!libArm32.isFile()) {
-            logger.warn("NOTE: Packaging 64-bit (arm64-v8a) libGTASA.so only; 32-bit armeabi-v7a/libGTASA.so is not present.")
-        } else if (!libArm64.isFile()) {
-            logger.warn("NOTE: Packaging 32-bit (armeabi-v7a) libGTASA.so only; 64-bit arm64-v8a/libGTASA.so is not present.")
         }
     }
 }
