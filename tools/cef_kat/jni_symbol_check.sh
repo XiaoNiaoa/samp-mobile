@@ -18,18 +18,36 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 JAVA="$ROOT/app/src/main/java/com/sampmobile/game/ui/cef/CefManager.java"
 PREFIX="Java_com_sampmobile_game_ui_cef_CefManager_"
 
+# llvm-nm 的宿主机目录名随平台变化：CI 是 linux-x86_64，本机 Windows 是
+# windows-x86_64。以前只写了 Windows 一条，在 Linux runner 上会静默 SKIP，
+# 表现为「CI 绿了但其实一条符号都没查」——假阴性，比红灯更危险。
 find_nm() {
-    for f in /d/android-sdk/ndk/*/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-nm.exe; do
-        [ -x "$f" ] && { printf '%s\n' "$f"; return 0; }
+    local sdk host
+    for sdk in "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}" /d/android-sdk "$HOME/android-sdk"; do
+        [ -n "$sdk" ] || continue
+        for host in linux-x86_64 darwin-x86_64 windows-x86_64; do
+            for f in "$sdk"/ndk/*/toolchains/llvm/prebuilt/"$host"/bin/llvm-nm*; do
+                [ -x "$f" ] && { printf '%s\n' "$f"; return 0; }
+            done
+        done
+    done
+    for f in llvm-nm nm; do
+        command -v "$f" >/dev/null 2>&1 && { command -v "$f"; return 0; }
     done
     return 1
 }
 
 find_so() {
-    ls -t "$ROOT"/app/build/intermediates/cxx/Debug/*/obj/arm64-v8a/libSAMPMOBILE.so 2>/dev/null | head -1
+    local so
+    so="$(ls -t "$ROOT"/app/build/intermediates/cxx/Debug/*/obj/arm64-v8a/libSAMPMOBILE.so 2>/dev/null | head -1)"
+    if [ -z "$so" ]; then
+        # AGP 换过中间产物布局，兜底整目录找一次。
+        so="$(find "$ROOT/app/build" -type f -name libSAMPMOBILE.so -path "*arm64-v8a*" 2>/dev/null | head -1)"
+    fi
+    printf '%s' "$so"
 }
 
-NM="$(find_nm)" || { echo "SKIP  找不到 llvm-nm（NDK 不在 /d/android-sdk/ndk 下）"; exit 0; }
+NM="$(find_nm)" || { echo "FAIL  找不到 llvm-nm（ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT 下没有 ndk）"; exit 1; }
 SO="$(find_so)"
 [ -n "$SO" ] || { echo "FAIL  找不到 libSAMPMOBILE.so，先编译"; exit 1; }
 [ -f "$JAVA" ] || { echo "FAIL  找不到 $JAVA"; exit 1; }
