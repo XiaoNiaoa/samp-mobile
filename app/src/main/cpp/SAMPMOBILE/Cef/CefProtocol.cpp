@@ -1,7 +1,6 @@
 #include "CefProtocol.h"
 
 #include <algorithm>
-#include <android/log.h>
 #include <cstring>
 
 namespace cefproto
@@ -396,8 +395,8 @@ bool DeserializePacket(const uint8_t* data, size_t size, NetworkPacket& out)
         default:
             // 未知类型：原来会掉出 switch 直接 return true，上层拿到一个
             // 只有 type 被赋值、载荷全空的 packet，行为不可预期。明确拒绝。
-            __android_log_print(ANDROID_LOG_WARN, "CefProto",
-                            "unknown packet type %u", static_cast<unsigned>(out.type));
+            // 刻意不调 android_log_print：本文件必须保持"纯逻辑"，
+            // 能被 tools/cef_kat 离线编译运行（与 CefLogic.java 同一约束）。
             return false;
     }
 
