@@ -278,7 +278,7 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
     }
 
     public void onPageShown() {
-        if (!isAdded()) return;
+        if (!isAdded() || rootView == null) return;
         settings = ClientSettings.reloadLauncher(requireContext());
         setWidgetsForSettings();
         if (currentCategory == CAT_MULTIPLAYER) {
@@ -506,7 +506,7 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
         settingsTabs = view.findViewById(R.id.settings_tabs);
         String[] titles = new String[CATEGORY_TITLE_RES.length];
         for (int i = 0; i < titles.length; i++) {
-            titles[i] = i == CAT_LANGUAGE ? I18n.tr("语言 / Language") : getString(CATEGORY_TITLE_RES[i]);
+            titles[i] = i == CAT_LANGUAGE ? "语言 / Language" : getString(CATEGORY_TITLE_RES[i]);
         }
         settingsTabs.setTabs(titles);
         settingsTabs.setOnTabSelectedListener((index, reselected) -> {
@@ -707,7 +707,7 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
 
     private void setupLanguageDropdown() {
         if (dropdown_app_language == null) return;
-        final String[] labels = {I18n.tr("中文"), "English"};
+        final String[] labels = {"中文", "English"};
         final String[] ids = {LocaleManager.LANG_ZH, LocaleManager.LANG_EN};
         dropdown_app_language.setAdapter(createDropdownAdapter(labels));
         dropdown_app_language.setThreshold(0);
