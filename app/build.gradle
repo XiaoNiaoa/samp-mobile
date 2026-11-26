@@ -20,9 +20,33 @@ def hasReleaseSigning = releaseStoreFile != null && releaseStoreFile.exists()
 def gamedataManifestUrl = (localProps.getProperty("SAMP_GAMEDATA_MANIFEST")
         ?: System.getenv("SAMP_GAMEDATA_MANIFEST") ?: "").trim()
 
+// Optional bundled-data packaging (tools/packaging/build_bundled_apk.py):
+// points at a prepared assets overlay containing gamedata/bundle.gdz + bundle.json,
+// which gets merged into the APK so first-run extraction needs no download.
+def bundleAssetsDir = (project.findProperty("sampBundleAssets")
+        ?: System.getenv("SAMP_BUNDLE_ASSETS") ?: "").toString().trim()
+if (!bundleAssetsDir.isEmpty() && !file(bundleAssetsDir).isDirectory()) {
+    throw new GradleException("sampBundleAssets points at a missing directory: " + bundleAssetsDir)
+}
+
 android {
     namespace "com.sampmobile.launcher"
     compileSdk 35
+
+    aaptOptions {
+        // The embedded bundle is already deflate-compressed zip data; compressing it
+        // again inside the APK would double the inflate cost on every first-run
+        // extraction and slow the build for zero size gain.
+        noCompress "gdz"
+    }
+
+    sourceSets {
+        main {
+            if (!bundleAssetsDir.isEmpty()) {
+                assets.srcDir(bundleAssetsDir)
+            }
+        }
+    }
 
     defaultConfig {
         applicationId "com.sampmobile.launcher"

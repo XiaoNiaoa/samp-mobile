@@ -57,6 +57,7 @@ import com.sampmobile.launcher.ui.adapter.ServerAdapter;
 import com.sampmobile.launcher.ui.fragment.ModsManagerFragment;
 import com.sampmobile.launcher.ui.fragment.SettingsPageFragment;
 import com.sampmobile.launcher.ui.widget.GtaTabStrip;
+import com.sampmobile.launcher.utils.BundledGamedata;
 import com.sampmobile.launcher.utils.ClientSettings;
 import com.sampmobile.launcher.utils.GameDataImporter;
 import com.sampmobile.launcher.utils.LauncherFonts;
@@ -148,18 +149,71 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
         if (isFinishing() || isDestroyed()) {
             return false;
         }
+        boolean hasBundle = BundledGamedata.isPresent(this);
         StringBuilder msg = new StringBuilder(I18n.tr("未检测到完整游戏数据包（缺少 "));
         msg.append(String.join("、", missing));
-        msg.append(I18n.tr("）。\n\n可前往「设置 → 文件验证」查看详细文件状态并选择本地导入或启动器下载精简版资源。"));
-        new AlertDialog.Builder(this)
+        if (hasBundle) {
+            msg.append(I18n.tr("）。\n\n本安装包已内置游戏资源，点击下方「解压内置资源」即可自动安装，无需联网下载。"));
+        } else {
+            msg.append(I18n.tr("）。\n\n可前往「设置 → 文件验证」查看详细文件状态并选择本地导入或启动器下载精简版资源。"));
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle(I18n.tr("缺少游戏数据包"))
                 .setMessage(msg.toString())
-                .setPositiveButton(I18n.tr("前往文件验证"), (d, w) -> openSettingsGameDataTab())
                 .setNeutralButton(I18n.tr("一键导入 .zip"), (d, w) ->
                         gameDataZipPicker.launch(new String[]{"application/zip", "application/octet-stream", "*/*"}))
-                .setNegativeButton(I18n.tr("取消"), null)
-                .show();
+                .setNegativeButton(I18n.tr("取消"), null);
+        if (hasBundle) {
+            builder.setPositiveButton(I18n.tr("解压内置资源"), (d, w) ->
+                    GameDataImportDialog.startBundledImport(this, null));
+        } else {
+            builder.setPositiveButton(I18n.tr("前往文件验证"), (d, w) -> openSettingsGameDataTab());
+        }
+        builder.show();
         return false;
+    }
+
+    /**
+     * Friend-test packages embed the full game data inside the APK: the whole point
+     * is install-and-play, so when core files are missing we offer extraction right
+     * on the server list instead of making the user dig through settings.
+     * Shown on every launch while data is incomplete — declining (「稍后」) leaves
+     * all manual entry points (server-join dialog / zip import) available.
+     */
+    private void maybePromptBundledExtraction() {
+        if (!BundledGamedata.isPresent(this)) {
+            return;
+        }
+        try {
+            detailExecutor.execute(() -> checkDataAndPromptBundled());
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Activity already destroyed within the post-delay window — nothing to prompt on.
+        }
+    }
+
+    private void checkDataAndPromptBundled() {
+        boolean missing = !GameDataImporter.findMissingCoreFiles(getExternalFilesDir(null)).isEmpty();
+        if (!missing) {
+            return;
+        }
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
+            BundledGamedata.Info info = BundledGamedata.inspect(this);
+            String sizeText = info.uncompressedBytes > 0
+                    ? String.format(java.util.Locale.US, "%.1f GB", info.uncompressedBytes / (1024.0 * 1024.0 * 1024.0))
+                    : I18n.tr("大量");
+            new AlertDialog.Builder(this)
+                    .setTitle(I18n.tr("首次运行需要解压游戏资源"))
+                    .setMessage(String.format(java.util.Locale.US,
+                            I18n.tr("本安装包已内置%s游戏资源，无需联网下载。\n\n首次运行需解压约 %s 数据到本机存储（约需几分钟，请保持屏幕常亮），解压完成后即可进服游玩。"),
+                            info.displayLabel(), sizeText))
+                    .setPositiveButton(I18n.tr("立即解压"), (d, w) ->
+                            GameDataImportDialog.startBundledImport(this, null))
+                    .setNegativeButton(I18n.tr("稍后"), null)
+                    .show();
+        });
     }
 
     private void openSettingsGameDataTab() {
@@ -224,6 +278,10 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
         onThemeColorChanged(LauncherThemeManager.getAccentColor(this));
 
         scheduleSettingsPrewarm();
+
+        // Let the server list settle first; the prompt itself is cheap and gated
+        // by both bundle presence and missing core data.
+        getWindow().getDecorView().postDelayed(this::maybePromptBundledExtraction, 900);
     }
 
     /**

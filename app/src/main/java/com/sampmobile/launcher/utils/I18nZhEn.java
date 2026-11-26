@@ -842,6 +842,19 @@ final class I18nZhEn {
         EN.put("，客户端只支持 ", ", the client only supports");
         EN.put("，当前为 ", ", currently");
         EN.put("，注意：该插件为 ", ", Note: This plug-in is");
+        EN.put("解压内置资源", "Extract built-in data");
+        EN.put("首次运行需要解压游戏资源", "Extract game data on first run");
+        EN.put("本安装包已内置%s游戏资源，无需联网下载。\n\n首次运行需解压约 %s 数据到本机存储（约需几分钟，请保持屏幕常亮），解压完成后即可进服游玩。", "This package embeds %s game data - no download needed.\n\nAbout %s of data must be extracted to local storage on first run (a few minutes; keep the screen on). You can play once it finishes.");
+        EN.put("立即解压", "Extract now");
+        EN.put("稍后", "Later");
+        EN.put("大量", "a large amount of");
+        EN.put("正在解压内置游戏资源", "Extracting built-in game data");
+        EN.put("当前安装包未内置游戏资源", "This package does not embed game data");
+        EN.put("存储空间不足", "Insufficient storage");
+        EN.put("解压内置资源需要约 %s 可用空间，当前仅剩 %s。请清理存储后重试。", "Extracting built-in data needs about %s of free space; only %s left. Free up storage and try again.");
+        EN.put("完整版", "full-edition");
+        EN.put("精简版", "lite-edition");
+        EN.put("）。\n\n本安装包已内置游戏资源，点击下方「解压内置资源」即可自动安装，无需联网下载。", ").\n\nThis package embeds the game data. Tap \"Extract built-in data\" below to install it automatically - no download needed.");
     }
 
     private I18nZhEn() {}
