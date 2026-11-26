@@ -1,5 +1,8 @@
 package com.sampmobile.game;
 
+
+import com.sampmobile.launcher.utils.I18n;
+import android.content.Context;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -17,6 +20,7 @@ import com.sampmobile.game.ui.GameInputArbiter;
 import com.sampmobile.game.ui.UI;
 import com.sampmobile.game.ui.cef.CefManager;
 import com.sampmobile.launcher.utils.ClientSettings;
+import com.sampmobile.launcher.utils.LocaleManager;
 import com.sampmobile.launcher.utils.ModManager;
 
 @Obfuscate
@@ -48,6 +52,11 @@ public class SAMP extends GTASA {
 
         System.loadLibrary("GTASA");
         System.loadLibrary("SAMPMOBILE");
+    }
+
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(LocaleManager.wrap(newBase));
     }
 
     private void loadModLibraries(ClientSettings settings) {
@@ -112,12 +121,12 @@ public class SAMP extends GTASA {
         loadLibraries();
 
         super.onCreate(savedInstanceState);
-        Toast.makeText(this, "SAMP 已启动", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, I18n.tr("SAMP 已启动"), Toast.LENGTH_LONG).show();
 
         File extDir = getExternalFilesDir(null);
         if (extDir == null) {
             Log.e(TAG, "External files directory is unavailable!");
-            Toast.makeText(this, "游戏数据存储目录不可用", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, I18n.tr("游戏数据存储目录不可用"), Toast.LENGTH_LONG).show();
             finish();
             return;
         }

@@ -1,5 +1,7 @@
 package com.sampmobile.launcher;
 
+
+import com.sampmobile.launcher.utils.I18n;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -59,6 +61,7 @@ import com.sampmobile.launcher.utils.ClientSettings;
 import com.sampmobile.launcher.utils.GameDataImporter;
 import com.sampmobile.launcher.utils.LauncherFonts;
 import com.sampmobile.launcher.utils.LauncherThemeManager;
+import com.sampmobile.launcher.utils.LocaleManager;
 import com.sampmobile.launcher.utils.SampQuery;
 import com.sampmobile.launcher.utils.ServerModel;
 import com.sampmobile.launcher.utils.Utils;
@@ -69,6 +72,7 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
     private static final int PAGE_SERVERS = 0;
     private static final int PAGE_MODS = 1;
     private static final int PAGE_SETTINGS = 2;
+    private static final String STATE_CURRENT_PAGE = "state_current_page";
 
     private static final String TAG_MODS = "frag_mods";
     private static final String TAG_SETTINGS = "frag_settings";
@@ -131,6 +135,11 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
                 }
             });
 
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(LocaleManager.wrap(newBase));
+    }
+
     private boolean ensureGameDataOrPrompt() {
         List<String> missing = GameDataImporter.findMissingCoreFiles(getExternalFilesDir(null));
         if (missing.isEmpty()) {
@@ -139,16 +148,16 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
         if (isFinishing() || isDestroyed()) {
             return false;
         }
-        StringBuilder msg = new StringBuilder("未检测到完整游戏数据包（缺少 ");
+        StringBuilder msg = new StringBuilder(I18n.tr("未检测到完整游戏数据包（缺少 "));
         msg.append(String.join("、", missing));
-        msg.append("）。\n\n可前往「设置 → 文件验证」查看详细文件状态并选择本地导入或启动器下载精简版资源。");
+        msg.append(I18n.tr("）。\n\n可前往「设置 → 文件验证」查看详细文件状态并选择本地导入或启动器下载精简版资源。"));
         new AlertDialog.Builder(this)
-                .setTitle("缺少游戏数据包")
+                .setTitle(I18n.tr("缺少游戏数据包"))
                 .setMessage(msg.toString())
-                .setPositiveButton("前往文件验证", (d, w) -> openSettingsGameDataTab())
-                .setNeutralButton("一键导入 .zip", (d, w) ->
+                .setPositiveButton(I18n.tr("前往文件验证"), (d, w) -> openSettingsGameDataTab())
+                .setNeutralButton(I18n.tr("一键导入 .zip"), (d, w) ->
                         gameDataZipPicker.launch(new String[]{"application/zip", "application/octet-stream", "*/*"}))
-                .setNegativeButton("取消", null)
+                .setNegativeButton(I18n.tr("取消"), null)
                 .show();
         return false;
     }
@@ -205,6 +214,12 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
         initServerList();
         initNavigation();
         initButtons();
+        if (savedInstanceState != null) {
+            int page = savedInstanceState.getInt(STATE_CURRENT_PAGE, PAGE_SERVERS);
+            if (page == PAGE_MODS || page == PAGE_SETTINGS) {
+                showPage(page);
+            }
+        }
         LauncherThemeManager.addListener(this);
         onThemeColorChanged(LauncherThemeManager.getAccentColor(this));
 
@@ -797,6 +812,12 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putInt(STATE_CURRENT_PAGE, currentPage);
+        super.onSaveInstanceState(outState);
     }
 
     @Override

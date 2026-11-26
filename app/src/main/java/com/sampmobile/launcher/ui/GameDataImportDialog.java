@@ -1,5 +1,7 @@
 package com.sampmobile.launcher.ui;
 
+
+import com.sampmobile.launcher.utils.I18n;
 import android.app.Activity;
 import android.net.Uri;
 import android.text.TextUtils;
@@ -32,7 +34,7 @@ public final class GameDataImportDialog {
         }
         File filesDir = activity.getExternalFilesDir(null);
         if (filesDir == null) {
-            Toast.makeText(activity, "无法访问应用外部存储目录", Toast.LENGTH_LONG).show();
+            Toast.makeText(activity, I18n.tr("无法访问应用外部存储目录"), Toast.LENGTH_LONG).show();
             return;
         }
 
@@ -42,7 +44,7 @@ public final class GameDataImportDialog {
         box.setPadding(pad, dp(activity, 14), pad, dp(activity, 8));
 
         TextView tvStatus = new TextView(activity);
-        tvStatus.setText("正在准备解压数据包...");
+        tvStatus.setText(I18n.tr("正在准备解压数据包..."));
         tvStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         box.addView(tvStatus);
 
@@ -67,10 +69,10 @@ public final class GameDataImportDialog {
 
         AtomicBoolean cancelled = new AtomicBoolean(false);
         AlertDialog dialog = new AlertDialog.Builder(activity)
-                .setTitle("正在导入游戏数据包")
+                .setTitle(I18n.tr("正在导入游戏数据包"))
                 .setView(box)
                 .setCancelable(false)
-                .setNegativeButton("取消", (d, w) -> cancelled.set(true))
+                .setNegativeButton(I18n.tr("取消"), (d, w) -> cancelled.set(true))
                 .create();
         dialog.show();
 
@@ -87,10 +89,10 @@ public final class GameDataImportDialog {
                             if (pct >= 0) {
                                 progressBar.setIndeterminate(false);
                                 progressBar.setProgress(pct);
-                                tvStatus.setText(String.format(Locale.US, "解压中 %d%%（已写入 %d 个文件）", pct, count));
+                                tvStatus.setText(String.format(Locale.US, I18n.tr("解压中 %d%%（已写入 %d 个文件）"), pct, count));
                             } else {
                                 progressBar.setIndeterminate(true);
-                                tvStatus.setText(String.format(Locale.US, "解压中（已写入 %d 个文件）...", count));
+                                tvStatus.setText(String.format(Locale.US, I18n.tr("解压中（已写入 %d 个文件）..."), count));
                             }
                             if (relPath != null && !relPath.isEmpty()) {
                                 tvFile.setText(relPath);
@@ -115,26 +117,26 @@ public final class GameDataImportDialog {
                         return;
                     }
                     if (res.cancelled) {
-                        Toast.makeText(activity, "已取消导入", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(activity, I18n.tr("已取消导入"), Toast.LENGTH_SHORT).show();
                     } else if (res.extractedFiles == 0) {
                         new AlertDialog.Builder(activity)
-                                .setTitle("未识别到游戏数据包")
-                                .setMessage("所选 ZIP 中未找到 GTA:SA / SA-MP 游戏目录（需包含 SAMP/、texdb/、anim/、data/、models/ 等）。请确认选择了 tools/gamedata/build_gamedata.py 生成的 .zip 文件。")
-                                .setPositiveButton("确定", null)
+                                .setTitle(I18n.tr("未识别到游戏数据包"))
+                                .setMessage(I18n.tr("所选 ZIP 中未找到 GTA:SA / SA-MP 游戏目录（需包含 SAMP/、texdb/、anim/、data/、models/ 等）。请确认选择了 tools/gamedata/build_gamedata.py 生成的 .zip 文件。"))
+                                .setPositiveButton(I18n.tr("确定"), null)
                                 .show();
                     } else if (res.ready) {
                         String mb = String.format(Locale.US, "%.1f MB", res.extractedBytes / (1024.0 * 1024.0));
-                        Toast.makeText(activity, "导入完成（" + res.extractedFiles + " 个文件，" + mb + "）", Toast.LENGTH_LONG).show();
+                        Toast.makeText(activity, I18n.tr("导入完成（") + res.extractedFiles + I18n.tr(" 个文件，") + mb + "）", Toast.LENGTH_LONG).show();
                     } else {
-                        StringBuilder sb = new StringBuilder("已解压 ");
-                        sb.append(res.extractedFiles).append(" 个文件，但仍缺少以下核心文件：\n");
+                        StringBuilder sb = new StringBuilder(I18n.tr("已解压 "));
+                        sb.append(res.extractedFiles).append(I18n.tr(" 个文件，但仍缺少以下核心文件：\n"));
                         for (String m : res.missingCoreFiles) {
                             sb.append("• ").append(m).append('\n');
                         }
                         new AlertDialog.Builder(activity)
-                                .setTitle("数据包不完整")
+                                .setTitle(I18n.tr("数据包不完整"))
                                 .setMessage(sb.toString().trim())
-                                .setPositiveButton("确定", null)
+                                .setPositiveButton(I18n.tr("确定"), null)
                                 .show();
                     }
                     if (onCompleted != null) {
@@ -148,9 +150,9 @@ public final class GameDataImportDialog {
                     }
                     if (!activity.isFinishing() && !activity.isDestroyed()) {
                         new AlertDialog.Builder(activity)
-                                .setTitle("导入失败")
+                                .setTitle(I18n.tr("导入失败"))
                                 .setMessage(e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())
-                                .setPositiveButton("确定", null)
+                                .setPositiveButton(I18n.tr("确定"), null)
                                 .show();
                     }
                     if (onCompleted != null) {

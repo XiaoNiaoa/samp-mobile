@@ -224,8 +224,12 @@ def _collect_java_native_methods() -> List[Tuple[str, str, str]]:
     native_decl_re = re.compile(r"\bnative\s+[\w<>\[\], ?]+\s+(\w+)\s*\(")
     pkg_re = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
     methods: List[Tuple[str, str, str]] = []
+    string_lit_re = re.compile(r'"(?:\\.|[^"\\])*"')
+    char_lit_re = re.compile(r"'(?:\\.|[^'\\])'")
     for p in sorted(java_root.rglob("*.java")):
         text = p.read_text(encoding="utf-8", errors="ignore")
+        text = string_lit_re.sub('""', text)
+        text = char_lit_re.sub("''", text)
         pkg_m = pkg_re.search(text)
         if not pkg_m:
             continue

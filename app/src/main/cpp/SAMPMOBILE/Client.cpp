@@ -33,6 +33,7 @@
 #include "Java/Java.h"
 #include "Java/MultiTouch.h"
 #include "UI/UI.h"
+#include "L10n.h"
 #include "UI/SAMPWidgets/PlayerTags.h"
 #include "UI/SAMPWidgets/SplashScreen.h"
 #include "UI/SAMPWidgets/Chat.h"
@@ -368,9 +369,9 @@ void Client::process(bool canRender2d)
 			if (pUI) {
 				if (pUI->buttonpanel()) pUI->buttonpanel()->setVisible(false);
 				if (pUI->chat()) {
-					pUI->chat()->addInfoMessage("-> GTA: SA %s started", VER_x32 ? "v2.10 (armeabi-v7a)" : "v2.10 (arm64-v8a)");
-					pUI->chat()->addInfoMessage("-> Type /j to start jetpack");
-					pUI->chat()->addInfoMessage("-> Click on map to teleport anywhere");
+					pUI->chat()->addInfoMessage(L10N("-> GTA: SA %s started", "-> GTA: SA %s 已启动"), VER_x32 ? "v2.10 (armeabi-v7a)" : "v2.10 (arm64-v8a)");
+					pUI->chat()->addInfoMessage(L10N("-> Type /j to start jetpack", "-> 输入 /j 开启喷气背包"));
+					pUI->chat()->addInfoMessage(L10N("-> Click on map to teleport anywhere", "-> 点击地图可传送到任意位置"));
 				}
 			}
 
