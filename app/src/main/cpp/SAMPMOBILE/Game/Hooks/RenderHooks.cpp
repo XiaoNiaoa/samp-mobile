@@ -19,6 +19,7 @@
 #include <SA.h>
 #include <spdlog/spdlog.h>
 #include <EGL/egl.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -104,90 +105,175 @@ DECL_HOOK(int32_t, CObject_Render, sa::CObject *_this)
 	return result;
 }
 
+// Manual SA-MP object rendering — covers the two cases the engine's own
+// CRenderer::ScanWorld never reaches:
+//   - out-of-bounds (m_bForceRender) objects: ScanWorld only scans the
+//     in-bounds sector grid around the camera, OOB positions are never scanned
+//   - in-bounds objects beyond the native scan/LOD range (~300m cap) but
+//     within the server-specified m_fDrawDistance
+// Mirrors the PC SA-MP pipeline (CObjectPool::Draw/DrawLast + CObject::Draw):
+// server draw-distance culling, sphere-frustum culling through the engine's
+// own CCamera::IsSphereVisible, opaque objects drawn immediately, transparent
+// (drawLast = model flags bit1) objects collected and drawn far-to-near so
+// alpha blending layers correctly.
+namespace {
+
+struct ManualObjectRenderEntry {
+	CObject* obj;
+	float distSq;
+};
+
+// render is single-threaded on the game thread — static storage avoids a
+// 16KB+ stack allocation every frame
+ManualObjectRenderEntry s_transparentObjects[MAX_OBJECTS];
+int s_transparentObjectCount = 0;
+
+} // namespace
+
 DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 {
 	CRenderer_RenderEverythingBarRoads();
 
-	if (pNetGame)
+	if (!pNetGame)
 	{
-		CObjectPool *pObjectPool = pNetGame->GetObjectPool();
-		if (pObjectPool)
+		return;
+	}
+	CObjectPool *pObjectPool = pNetGame->GetObjectPool();
+	if (!pObjectPool)
+	{
+		return;
+	}
+
+	RwMatrix matCam{};
+	bool hasCam = false;
+	if (pGame && pGame->GetCamera())
+	{
+		pGame->GetCamera()->GetMatrix(&matCam);
+		hasCam = true;
+	}
+	if (!hasCam)
+	{
+		return;
+	}
+	float lodScale = 1.0f;
+	if (auto *pLodScale = eng::as<float *>(eng::Sym::CRenderer_ms_lodDistScale))
+	{
+		if (std::isfinite(*pLodScale) && *pLodScale > 0.1f)
 		{
-			RwMatrix matCam{};
-			bool hasCam = false;
-			if (pGame && pGame->GetCamera())
+			lodScale = *pLodScale;
+		}
+	}
+	sa::CCamera* pEngineCam = &sa::getTheCamera();
+
+	s_transparentObjectCount = 0;
+
+	for (OBJECTID i = 0; i < MAX_OBJECTS; i++)
+	{
+		CObject *pObject = pObjectPool->GetAt(i);
+		if (!pObject || pObject->IsTimedHidden())
+		{
+			continue;
+		}
+		sa::CPhysical *pEntity = pObject->m_entity;
+		if (!pEntity || !pEntity->m_pRwObject || IsEntityPlaceable(pEntity))
+		{
+			continue;
+		}
+
+		const sa::CVector &pos = pEntity->GetPosition();
+		const float dx = pos.x - matCam.pos.x;
+		const float dy = pos.y - matCam.pos.y;
+		const float dz = pos.z - matCam.pos.z;
+		const float distSq = dx * dx + dy * dy + dz * dz;
+
+		// server-specified draw distance is position-independent: it caps
+		// OOB objects exactly like in-bounds ones (an unset 0 means no
+		// server-imposed cap — OOB map structures stay visible as before)
+		const float drawDist = pObject->m_fDrawDistance;
+		if (drawDist > 0.0f && distSq > drawDist * drawDist)
+		{
+			continue;
+		}
+
+		sa::CBaseModelInfo *pModelInfo = GetModelInfoByID(pObject->GetModelIndex());
+
+		if (!pObject->m_bForceRender)
+		{
+			// in-bounds objects need manual rendering only when the server
+			// asked for a draw distance beyond what the engine's ScanWorld
+			// covers — inside the native range the engine already drew them
+			if (drawDist <= 0.0f)
 			{
-				pGame->GetCamera()->GetMatrix(&matCam);
-				hasCam = true;
+				continue;
 			}
-			float lodScale = 1.0f;
-			if (auto *pLodScale = eng::as<float *>(eng::Sym::CRenderer_ms_lodDistScale))
+			float nativeDist = 300.0f;
+			if (pModelInfo && pModelInfo->m_lodDistance > 0.0f)
 			{
-				if (std::isfinite(*pLodScale) && *pLodScale > 0.1f)
+				const float scaled = pModelInfo->m_lodDistance * lodScale;
+				if (scaled < nativeDist)
 				{
-					lodScale = *pLodScale;
+					nativeDist = scaled;
 				}
 			}
-
-			for (OBJECTID i = 0; i < MAX_OBJECTS; i++)
+			const float minFarDist = nativeDist * 0.9f;
+			if (distSq <= minFarDist * minFarDist)
 			{
-				CObject *pObject = pObjectPool->GetAt(i);
-				if (!pObject)
-				{
-					continue;
-				}
-				if (pObject->m_bForceRender)
-				{
-					pObject->Render();
-					continue;
-				}
-				if (hasCam && pObject->m_fDrawDistance > 0.0f && pObject->m_entity
-					&& pObject->m_entity->m_pRwObject && !IsEntityPlaceable(pObject->m_entity))
-				{
-					const sa::CVector &pos = pObject->m_entity->GetPosition();
-					const float dx = pos.x - matCam.pos.x;
-					const float dy = pos.y - matCam.pos.y;
-					const float dz = pos.z - matCam.pos.z;
-					const float distSq = dx * dx + dy * dy + dz * dz;
-					const float maxDist = pObject->m_fDrawDistance;
-					if (distSq > maxDist * maxDist)
-					{
-						continue;
-					}
-
-					float nativeDist = 300.0f;
-					float boundRadius = 50.0f;
-					if (sa::CBaseModelInfo *mi = GetModelInfoByID(pObject->GetModelIndex()))
-					{
-						if (mi->m_lodDistance > 0.0f)
-						{
-							const float scaled = mi->m_lodDistance * lodScale;
-							if (scaled < nativeDist)
-							{
-								nativeDist = scaled;
-							}
-						}
-						if (mi->m_pColModel && mi->m_pColModel->m_boundSphere.m_fRadius > boundRadius)
-						{
-							boundRadius = mi->m_pColModel->m_boundSphere.m_fRadius;
-						}
-					}
-
-					// GTA's CRenderer::ScanWorld already renders normal objects within nativeDist (~300m cap);
-					// manually render objects beyond that range up to the server-specified m_fDrawDistance.
-					const float minFarDist = nativeDist * 0.9f;
-					if (distSq > minFarDist * minFarDist)
-					{
-						const float fwd = dx * matCam.up.x + dy * matCam.up.y + dz * matCam.up.z;
-						if (fwd > -boundRadius)
-						{
-							pObject->UpdateRwMatrixAndFrame();
-							pObject->Render();
-						}
-					}
-				}
+				continue;
 			}
 		}
+
+		// sphere-frustum culling with the collision bound sphere transformed
+		// into world space — the same test PC SA-MP applies per object in
+		// CObject::Draw (GameTestCameraSphere wraps CCamera::IsSphereVisible)
+		float boundRadius = 50.0f;
+		sa::CVector worldCentre = pos;
+		if (pModelInfo && pModelInfo->m_pColModel)
+		{
+			const sa::CSphere &sphere = pModelInfo->m_pColModel->m_boundSphere;
+			if (sphere.m_fRadius > 0.0f)
+			{
+				boundRadius = sphere.m_fRadius;
+			}
+			const sa::CVector &c = sphere.m_vecCenter;
+			if (pEntity->m_matrix)
+			{
+				const sa::CVector &right = pEntity->GetRight();
+				const sa::CVector &fwd = pEntity->GetForward();
+				const sa::CVector &up = pEntity->GetUp();
+				worldCentre.x = pos.x + right.x * c.x + fwd.x * c.y + up.x * c.z;
+				worldCentre.y = pos.y + right.y * c.x + fwd.y * c.y + up.y * c.z;
+				worldCentre.z = pos.z + right.z * c.x + fwd.z * c.y + up.z * c.z;
+			}
+		}
+		if (!eng::fn::CCamera_IsSphereVisible( pEngineCam, &worldCentre, boundRadius))
+		{
+			continue;
+		}
+
+		// model flags bit1 (drawLast) marks alpha/transparent objects — they
+		// must render after all opaque geometry far-to-near
+		const bool bDrawLast = pModelInfo && ((pModelInfo->m_flags >> 1) & 1);
+		if (bDrawLast && s_transparentObjectCount < MAX_OBJECTS)
+		{
+			s_transparentObjects[s_transparentObjectCount++] = {pObject, distSq};
+			continue;
+		}
+
+		pObject->UpdateRwMatrixAndFrame();
+		pObject->Render();
+	}
+
+	if (s_transparentObjectCount > 1)
+	{
+		std::sort(s_transparentObjects, s_transparentObjects + s_transparentObjectCount,
+			[](const ManualObjectRenderEntry &a, const ManualObjectRenderEntry &b) {
+				return a.distSq > b.distSq;
+			});
+	}
+	for (int t = 0; t < s_transparentObjectCount; ++t)
+	{
+		s_transparentObjects[t].obj->UpdateRwMatrixAndFrame();
+		s_transparentObjects[t].obj->Render();
 	}
 }
 

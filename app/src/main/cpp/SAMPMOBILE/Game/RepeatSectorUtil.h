@@ -4,30 +4,33 @@
 #include "Core/PtrNode.h"
 #include <SA.h>
 #include <cstdint>
-#include <vector>
 
 namespace sa_world {
 
 // Shared canonical helper for linking a CPhysical entity into GTA:SA's 16x16
-// CWorld::ms_aRepeatSectors hash grid with:
-//   - 256-bit bucket deduplication (max 1 entry per hash group per entity)
-//   - null-checked CEntryInfoNode / CPtrNodeDoubleLink pool allocations
-//   - optional tracking of newly allocated CEntryInfoNode records & global budget cap
+// CWorld::ms_aRepeatSectors hash grid, replicating CPhysical::Add's insertion
+// for non-big-building entities — minus two stock flaws:
+//   - stock inserts one node per overlapped cell WITHOUT deduplicating hash
+//     groups (a 2500m custom map chunk inserts 1,100+ duplicate nodes into
+//     only 256 buckets); we dedupe with a 256-bit mask, max 1 node per group
+//   - stock never null-checks operator new() on CEntryInfoNode /
+//     CPtrNodeDoubleLink, crashing with SIGSEGV if the pool ever fills up
 //
-// Used by both WorldHooks::CPhysical_Add (in-bounds large custom maps) and
-// OobCollision::InjectIntoRepeatSectors (out-of-bounds |x|>3000 entities).
+// The bucket hash is (x & 0xF) | ((y & 0xF) << 4) — pure mod-16 bitwise math,
+// so ANY sector coord (including negative out-of-bounds ones) lands in a
+// valid bucket with no additional range handling. Iterating more than 16
+// cells on an axis can only revisit residues already covered, so the loop
+// is clamped to 16 cells per axis (256 iterations worst case).
+//
+// Used by WorldHooks::CPhysical_Add / CPhysical_RemoveAndAdd replacements.
 struct RepeatSectorLinkResult {
 	int added = 0;
 	bool poolExhausted = false;
-	bool budgetReached = false;
 };
 
 inline RepeatSectorLinkResult linkEntityToRepeatSectors(
 	sa::CPhysical* entity,
-	int minX, int minY, int maxX, int maxY,
-	std::vector<CEntryInfoNode*>* outAllocatedInfos = nullptr,
-	int* ioBudgetCounter = nullptr,
-	int budgetLimit = 0)
+	int minX, int minY, int maxX, int maxY)
 {
 	RepeatSectorLinkResult result{};
 	if (!entity || minX > maxX || minY > maxY) {
@@ -49,6 +52,10 @@ inline RepeatSectorLinkResult linkEntityToRepeatSectors(
 		return result;
 	}
 
+	// cells repeat mod 16 — iterating further can never reach a new group
+	if (maxX - minX > 15) maxX = minX + 15;
+	if (maxY - minY > 15) maxY = minY + 15;
+
 	uint32_t seenMask[8] = {};
 	for (int cy = minY; cy <= maxY; ++cy) {
 		for (int cx = minX; cx <= maxX; ++cx) {
@@ -58,11 +65,6 @@ inline RepeatSectorLinkResult linkEntityToRepeatSectors(
 				continue;
 			}
 			seenMask[group >> 5] |= bit;
-
-			if (ioBudgetCounter && budgetLimit > 0 && *ioBudgetCounter >= budgetLimit) {
-				result.budgetReached = true;
-				return result;
-			}
 
 			auto* pInfo = eng::fn::CEntryInfoNode_OpNew<CEntryInfoNode*>(sizeof(CEntryInfoNode));
 			auto* pNode = eng::fn::CPtrNodeDoubleLink_OpNew<sa::CPtrNodeDoubleLink*>(sizeof(sa::CPtrNodeDoubleLink));
@@ -92,12 +94,6 @@ inline RepeatSectorLinkResult linkEntityToRepeatSectors(
 			entity->m_pCollisionList.m_pNode = pInfo;
 
 			++result.added;
-			if (ioBudgetCounter) {
-				++(*ioBudgetCounter);
-			}
-			if (outAllocatedInfos) {
-				outAllocatedInfos->push_back(pInfo);
-			}
 		}
 	}
 	return result;

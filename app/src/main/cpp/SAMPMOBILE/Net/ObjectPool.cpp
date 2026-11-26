@@ -6,6 +6,8 @@
 #include "../Game/Aimstuff.h"
 #include "../Game/Camera.h"
 #include "../Game/Object.h"
+
+#include "../Game/OobCollision.h"
 #include "../Game/Util.h"
 #include "../Game/Artwork/ArtworkCore.h"
 #include "../Game/Artwork/ArtworkManager.h"
@@ -231,10 +233,10 @@ void CObjectPool::Process()
 		}
 	}
 
-	// OOB vehicles need injected sector records to collide — this used to
-	// hang off a single object's Process, so maps without OOB objects
-	// never maintained OOB vehicle collision at all
-	ProcessOobVehicleSectors();
+	// OOB vehicles need their colModel slots pinned (position-driven
+	// CColStore streaming never matches them) — sector registration itself
+	// is fully handled by the hooked CPhysical::Add/RemoveAndAdd now
+	ProcessOobVehicleColPins();
 
 	m_dwLastTick = dwThisTick;
 }

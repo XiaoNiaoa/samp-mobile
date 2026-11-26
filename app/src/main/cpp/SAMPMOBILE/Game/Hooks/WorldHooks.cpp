@@ -416,44 +416,46 @@ DECL_HOOK(bool, CVehicle_UsesSiren, sa::CVehicle *_this)
 	return false;
 }
 
-// sector coords are floor(pos/50 + 60); CPhysical::Add rejects any bound
-// rect whose coords land outside [-120,119] (unsigned c+120 <= 240), so
-// out-of-bounds entities never get sector records at all. Repeat-sector
-// groups only hash coord & 0xF — remap out-of-range rect edges mod-16 so
-// Add accepts the entity and lands its records in the same groups a
-// scanner at its true position hashes to.
-// Destination band is the dead zone (w0-112 → coords -112..-97,
-// x in [-8600,-7850]): remapping into positive cells 0..15 placed the rect
-// over real SF-map territory, and since rect-vs-rect tests use the
-// REMAPPED rect, OOB entities ghost-collided with real entities sharing
-// their hash group — the residual "sticky" feel. No real entity can ever
-// reach x < -3000, so dead-zone rects can never overlap real ones.
-// Same mechanism libMultiSA ships: it inline-hooks GetBoundRect at +0x53.
-DECL_HOOK(sa::CRect, CPhysical_GetBoundRect, sa::CPhysical *_this)
+// Stock CPhysical::Add/RemoveAndAdd fetch the bound rect through vtable
+// slot 10 (virtual GetBoundRect) — replicate the dispatch exactly so any
+// subclass override keeps its say. GetBoundRect must always return TRUE
+// world coords: an earlier revision of this file inline-hooked it to remap
+// out-of-bounds rects into a mod-16-congruent "dead zone", which lied to
+// every engine consumer (broad-phase rect tests included) — unnecessary
+// once Add no longer rejects out-of-range coords.
+static sa::CRect CallVirtualGetBoundRect(sa::CPhysical *pEnt)
 {
-	sa::CRect r = CPhysical_GetBoundRect(_this);
-	auto fixAxis = [](float &lo, float &hi) {
-		int c0 = (int) floorf(lo / 50.0f + 60.0f);
-		int c1 = (int) floorf(hi / 50.0f + 60.0f);
-		if (c0 >= -120 && c0 <= 120 && c1 >= -120 && c1 <= 120) return;
-		if (c1 < c0) { int t = c0; c0 = c1; c1 = t; }
-		int span = c1 - c0;
-		if (span > 15) span = 15;
-		int w0 = c0 & 0xF;
-		lo = (w0 - 172) * 50.0f + 25.0f;
-		hi = (w0 + span - 172) * 50.0f + 25.0f;
-	};
-	fixAxis(r.left, r.right);
-	fixAxis(r.bottom, r.top);
-	return r;
+	auto **ppVtbl = *reinterpret_cast<void ***>(pEnt);
+	auto pfn = reinterpret_cast<sa::CRect (*)(sa::CPhysical *)>(
+		ppVtbl[0x50 / sizeof(void *)]);
+	return pfn(pEnt);
 }
 
-// Stock GTA:SA CPhysical::Add() inserts into the 16x16 CWorld::ms_aRepeatSectors hash grid
-// WITHOUT deduplicating repeat-sector buckets (so a 2500m custom 0.3.DL map chunk inserts
-// 1,100+ duplicate nodes into only 256 buckets!) AND WITHOUT null-checking operator new()
-// on CEntryInfoNode / CPtrNodeDoubleLink (crashing with SIGSEGV if the pool ever fills up).
-// Deduplicating buckets (max 256 per entity) + null-checking allocations eliminates both
-// duplicate collision/render scans and pool-exhaustion crashes on massive custom-map servers.
+static inline void BoundRectToSectorCoords(const sa::CRect &r, int &minX, int &minY, int &maxX, int &maxY)
+{
+	minX = static_cast<int>(floorf(r.left / 50.0f + 60.0f));
+	maxX = static_cast<int>(floorf(r.right / 50.0f + 60.0f));
+	minY = static_cast<int>(floorf(r.bottom / 50.0f + 60.0f));
+	maxY = static_cast<int>(floorf(r.top / 50.0f + 60.0f));
+}
+
+// Stock GTA:SA CPhysical::Add() inserts into the 16x16 CWorld::ms_aRepeatSectors
+// hash grid with three flaws this replacement fixes:
+//   - it REJECTS any bound rect whose sector coord lands outside [-120,120]
+//     ((c+120) u<= 240), so out-of-bounds (|x/y|>3000) entities never get
+//     sector records at all — yet disassembly shows the insertion itself only
+//     ever writes ms_aRepeatSectors through the mod-16 bucket hash, which is
+//     safe for ANY coord (the static ms_aSectorX/Y grids are only written by
+//     CEntity::Add on the big-building path, which is passed through below).
+//     Every scanner (CheckCollision / ProcessShift / ProcessVerticalLine /
+//     ProcessLineOfSight) hashes RAW coords mod-16 with no clamping, so
+//     simply dropping the rejection unifies in-bounds and out-of-bounds
+//     entities on the engine's own single path — zero coordinate fakery.
+//   - it inserts one node per overlapped cell WITHOUT deduplicating hash
+//     groups (a 2500m custom 0.3.DL map chunk inserts 1,100+ duplicate nodes
+//     into only 256 buckets);
+//   - it never null-checks operator new() on CEntryInfoNode /
+//     CPtrNodeDoubleLink, crashing with SIGSEGV if the pool ever fills up.
 DECL_HOOK(void, CPhysical_Add, sa::CPhysical *_this)
 {
 	if (!_this) return;
@@ -462,15 +464,10 @@ DECL_HOOK(void, CPhysical_Add, sa::CPhysical *_this)
 		return;
 	}
 
-	const sa::CRect r = CPhysical_GetBoundRect_hook(_this);
-	const int minX = static_cast<int>(floorf(r.left / 50.0f + 60.0f));
-	const int maxX = static_cast<int>(floorf(r.right / 50.0f + 60.0f));
-	const int minY = static_cast<int>(floorf(r.bottom / 50.0f + 60.0f));
-	const int maxY = static_cast<int>(floorf(r.top / 50.0f + 60.0f));
-
-	if (minX < -120 || minX > 120 || maxX < -120 || maxX > 120
-			|| minY < -120 || minY > 120 || maxY < -120 || maxY > 120
-			|| minX > maxX || minY > maxY) {
+	const sa::CRect r = CallVirtualGetBoundRect(_this);
+	int minX, minY, maxX, maxY;
+	BoundRectToSectorCoords(r, minX, minY, maxX, maxY);
+	if (minX > maxX || minY > maxY) {
 		return;
 	}
 
@@ -482,6 +479,83 @@ DECL_HOOK(void, CPhysical_Add, sa::CPhysical *_this)
 			spdlog::error("CPhysical::Add: repeat-sector pool exhausted (model={}); skipping remaining cells to prevent crash",
 				static_cast<int>(_this->m_nModelIndex));
 		}
+	}
+}
+
+// Stock CPhysical::RemoveAndAdd() is an INLINED copy of the same insertion
+// logic (it never calls Add/Remove for non-big buildings) — but unlike Add
+// it has NO [-120,120] rejection: moving entities already re-register at any
+// coordinate natively. Replace it anyway so moving entities get the same
+// dedup + pool-exhaustion protection as static ones (a huge MoveTo object
+// would otherwise re-insert 1,100+ duplicate nodes on every step).
+// Net effect of the stock node-reuse shuffle is identical to a full
+// remove + reinsert: reused nodes are relinked at the target bucket head,
+// exactly where a fresh allocation would land.
+DECL_HOOK(void, CPhysical_RemoveAndAdd, sa::CPhysical *_this)
+{
+	if (!_this) return;
+	if (_this->m_bIsBIGBuilding) {
+		CPhysical_RemoveAndAdd(_this);
+		return;
+	}
+
+	// compute the target rect BEFORE unlinking — with a degenerate rect the
+	// stock implementation also inserts nothing, but it never strips the
+	// existing records either, and neither should we
+	const sa::CRect r = CallVirtualGetBoundRect(_this);
+	int minX, minY, maxX, maxY;
+	BoundRectToSectorCoords(r, minX, minY, maxX, maxY);
+	if (minX > maxX || minY > maxY) {
+		return;
+	}
+
+	eng::fn::CPhysical_Remove( _this);
+
+	const auto res = sa_world::linkEntityToRepeatSectors(_this, minX, minY, maxX, maxY);
+	if (res.poolExhausted) {
+		static bool s_loggedPoolFullRnA = false;
+		if (!s_loggedPoolFullRnA) {
+			s_loggedPoolFullRnA = true;
+			spdlog::error("CPhysical::RemoveAndAdd: repeat-sector pool exhausted (model={}); skipping remaining cells to prevent crash",
+				static_cast<int>(_this->m_nModelIndex));
+		}
+	}
+}
+
+// GTA:SA treats a ped standing on ANY CObject like standing on a moving
+// vehicle roof: CPed::ProcessEntityCollision writes m_pContactEntity
+// (+0x6d8) for entity type 4, and CPed::UpdatePosition then clamps the
+// per-frame XY velocity delta to 0.01f * CTimer::ms_fTimeStep (constant at
+// 0x7109b4) unless (contactPhysFlags & 0xC) == 0x4 — a condition neither
+// static (0xC) nor dynamic (0x0) objects satisfy. After any wall graze or
+// friction speed loss the ped needs 10-20 frames to crawl back to speed —
+// the "walking on glue" feel of every custom object map. Buildings never
+// set the contact entity at all.
+// Fix: for SA-MP objects that are not mid-MoveTo (attached objects carry
+// zero velocity, so the contact coupling is a no-op for them too), clear
+// the contact entity for the duration of UpdatePosition — static object
+// floors then behave exactly like building floors. MoveTo platforms keep
+// the coupling so elevator surfing still works.
+DECL_HOOK(void, CPed_UpdatePosition, sa::CPed *_this)
+{
+#if defined(__aarch64__) || defined(__x86_64__)
+	static_assert(offsetof(sa::CPed, m_pGroundPhysical) == 0x6d8,
+		"m_pGroundPhysical must match the +0x6d8 contact-entity write in CPed::ProcessEntityCollision");
+#else
+	static_assert(offsetof(sa::CPed, m_pGroundPhysical) == 0x56c,
+		"m_pGroundPhysical must match the +0x56c contact-entity write in arm32 CPed::ProcessEntityCollision (0x4a38bc)");
+#endif
+	sa::CPhysical *pContact = _this ? _this->m_pGroundPhysical : nullptr;
+	CObject *pObj = (pContact && pContact->m_nType == sa::ENTITY_TYPE_OBJECT)
+		? CObject::FindByGtaEntity(pContact) : nullptr;
+	const bool bStaticSampObject = pObj && !(pObj->m_byteMoving & 1);
+
+	if (bStaticSampObject) {
+		_this->m_pGroundPhysical = nullptr;
+	}
+	CPed_UpdatePosition(_this);
+	if (bStaticSampObject) {
+		_this->m_pGroundPhysical = pContact;
 	}
 }
 
@@ -583,8 +657,9 @@ void InstallWorldHooks()
 	REG_HOOK(Boot, CCivilianPed_ProcessControl, CCivilianPed_ProcessControl, "Preserve invulnerable Actor transform in ProcessControl");
 	REG_HOOK(Boot, CTrailer_BreakTowLink, CTrailer_BreakTowLink, "Prevent spurious trailer detach");
 	REG_HOOK(Boot, CVehicle_UsesSiren, CVehicle_UsesSiren, "Enable horn-siren on non-emergency vehicles with addSiren");
-	REG_HOOK(Boot, CPhysical_GetBoundRect, CPhysical_GetBoundRect, "OOB (|x|>3000) sector bound remapping");
-	REG_HOOK(Boot, CPhysical_Add, CPhysical_Add, "Deduped & null-safe repeat-sector registration for large custom maps");
+	REG_HOOK(Boot, CPhysical_Add, CPhysical_Add, "Deduped, null-safe, range-unclamped repeat-sector registration");
+	REG_HOOK(Boot, CPhysical_RemoveAndAdd, CPhysical_RemoveAndAdd, "Deduped & null-safe repeat-sector re-registration for moving entities");
+	REG_HOOK(Boot, CPed_UpdatePosition, CPed_UpdatePosition, "Static object floors: no vehicle-roof acceleration clamp");
 	REG_HOOK(Boot, CWorld_CameraToIgnoreThisObject, CWorld_CameraToIgnoreThisObject, "SetObjectNoCameraCollision camera ignore");
 	REG_HOOK(Boot, CCollision_BuildCacheOfCameraCollision, CCollision_BuildCacheOfCameraCollision, "OOB object camera collision scan");
 	REG_HOOK(Boot, CPlantMgr_ProcessEntryCollisionDataSections_AddLocTris, CPlantMgr_AddLocTris, "Guard bad col triangle indices");

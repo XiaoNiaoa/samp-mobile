@@ -78,22 +78,17 @@ void CEntity::TeleportTo(float fX, float fY, float fZ)
 {
 	// spdlog::info("CEntity::TeleportTo({}, {}, {})", fX, fY, fZ);
 
-	RwMatrix mat;
-
 	if (m_entity && !IsEntityPlaceable(m_entity)) {
 		uint16_t modelIndex = m_entity->m_nModelIndex;
 		if (modelIndex != TRAIN_PASSENGER_LOCO &&
 				modelIndex != TRAIN_FREIGHT_LOCO &&
 				modelIndex != TRAIN_TRAM) {
-			if (fX > 3000.0f || fX < -3000.0f || fY > 3000.0f || fY < -3000.0f) {
-				mat = m_entity->GetMatrix().ToRwMatrix();
-				mat.pos = sa::CVector{fX, fY, fZ};
-				m_entity->SetMatrix(mat);
-				UpdateRwMatrixAndFrame();
-			}
-			else {
-				Memory::callFunction(*(void**) (*(uintptr_t*) m_entity + 15 * sizeof(void*)), m_entity, fX, fY, fZ, 0);
-			}
+			// engine Teleport is a clean CWorld::Remove -> matrix write ->
+			// UpdateRwFrame -> CWorld::Add cycle; with the hooked
+			// CPhysical::Add accepting any coordinate it works uniformly
+			// in-bounds and out-of-bounds (no more matrix-only OOB bypass
+			// leaving stale sector records behind)
+			Memory::callFunction(*(void**) (*(uintptr_t*) m_entity + 15 * sizeof(void*)), m_entity, fX, fY, fZ, 0);
 		}
 		else {
 			ScriptCommand(&put_train_at, m_gtaId, fX, fY, fZ);

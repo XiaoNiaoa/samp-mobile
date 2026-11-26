@@ -105,8 +105,7 @@ public:
 	void ProcessMaterialText();
 
 	void EnsureRwObject();
-	void EnsureRepeatSector();
-	void RemoveFromRepeatSector();
+	void ApplySampObjectPhysics();
 	void TryEnableUVAnim();
 	void UpdateUVAnim();
 	void TryChangeToCustomObjectMaterial();
@@ -116,6 +115,7 @@ public:
 	static CObject* FindByGtaEntity(sa::CEntity* pEntity);
 	int GetModelIndex() const { return m_iModel; }
 	int GetServerModelIndex() const { return m_iServerModel; }
+	bool IsTimedHidden() const { return m_bTimedHidden; }
 	// Recreates the underlying GTA CObject entity with a different GTA model index while
 	// preserving transform, draw distance, camera-col flag, timed visibility, and materials.
 	bool SwapGtaModel(int iNewGtaModel);
@@ -176,17 +176,7 @@ private:
 	float m_fDistanceToTargetPoint;
 	uint32_t m_dwMoveTick;
 
-	int m_aiInjRect[4];
-	std::vector<CEntryInfoNode*> m_aInjectedInfo;
 	int m_iPinnedColSlot;
 	uint32_t m_dwLastColRequestTick;
 	bool m_bColDiagLogged;
 };
-
-/**
- * Per-frame maintenance for out-of-bounds pool vehicles — injects the
- * repeat-sector records an OOB vehicle's own ProcessCollision needs.
- * Runs from CObjectPool::Process (game thread) so it also works on maps
- * that have no OOB objects at all.
- */
-void ProcessOobVehicleSectors();

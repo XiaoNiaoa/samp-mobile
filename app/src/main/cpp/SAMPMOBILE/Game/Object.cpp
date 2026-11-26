@@ -122,10 +122,14 @@ CObject::CObject(int iModel, sa::CVector vecPos, sa::CVector vecRot, float fDraw
 		m_iModel = iModel;
 
 		EnsureRwObject();
+		ApplySampObjectPhysics();
 
+		// create_object may snap the spawn Z — re-assert the exact server
+		// position through the full Remove -> SetMatrix -> Add cycle so the
+		// repeat-sector records always match the final matrix
 		RwMatrix mat = m_entity->GetMatrix().ToRwMatrix();
 		mat.pos = vecPos;
-		m_entity->SetMatrix(mat);
+		UpdateMatrix(mat);
 		SetRotation(&vecRot);
 
 		// out-of-bounds and long-draw-distance entities may bypass the world's
@@ -159,7 +163,6 @@ CObject::CObject(int iModel, sa::CVector vecPos, sa::CVector vecRot, float fDraw
 	m_iPinnedColSlot = -1;
 	m_dwLastColRequestTick = 0;
 	m_bColDiagLogged = false;
-	m_aiInjRect[0] = m_aiInjRect[1] = m_aiInjRect[2] = m_aiInjRect[3] = -1;
 
 	if (m_bForceRender && m_entity) {
 		spdlog::info("OOB object: model={} entity={:p} rwObj={:p} moving={:p}", iModel,
@@ -173,7 +176,6 @@ CObject::CObject(int iModel, sa::CVector vecPos, sa::CVector vecRot, float fDraw
 		pGame->GetWorldTime(&hour, &minute);
 		if (!artwork::isTimedObjectVisible(hour, m_timeOn, m_timeOff)) {
 			m_bTimedHidden = true;
-			RemoveFromRepeatSector();
 			m_entity->Remove();
 			SetCollisionChecking(false);
 		}
@@ -201,16 +203,6 @@ CObject::~CObject()
 
 	sa::CObject* pEntity = m_gtaId ? GamePool_Object_GetAt(m_gtaId) : nullptr;
 
-	// always balance the injection bookkeeping — RemoveFromRepeatSector
-	// re-verifies entity identity itself and falls back to just dropping
-	// the stale vector; skipping it when the slot was recycled would leak
-	// s_iOobInjectedTotal until the budget disables OOB injection
-	RemoveFromRepeatSector();
-
-	// the engine may already have recycled the slot — unlink our sector
-	// records only while the entity is provably still ours; if it's gone,
-	// its teardown removed the records too (they're properly linked) and
-	// touching the chain would free pool slots that were re-issued
 	if (pEntity && pEntity == m_entity && !IsEntityPlaceable(pEntity)) {
 		ScriptCommand(&destroy_object, m_gtaId);
 		if (GetModelRefCounts(m_iModel) == 0) {
@@ -258,7 +250,48 @@ void CObject::EnsureRwObject()
 
 	spdlog::debug("EnsureRwObject: re-instancing atomic for object {} (model {})", m_gtaId, m_iModel);
 	CEntity::SetModelIndex(m_iModel);
+	// engine SetModelIndex may re-apply object.dat physics data — restore
+	// the SA-MP static-object configuration afterwards
+	ApplySampObjectPhysics();
 	UpdateRwMatrixAndFrame();
+}
+
+/**
+ * PC SA-MP parity + static convergence for server-authoritative objects:
+ *  - m_nFlags bit31 (0x80000000) is PC SA-MP's SetBackendHighFlag(): the
+ *    hooked CPhysical::ProcessCollision early-outs on it, so SA-MP objects
+ *    never run their own (meaningless and interpolation-fighting) collision
+ *    sweep. PC sets this on every object at creation (object.cpp:748).
+ *  - physicalFlags bits 1-3 forced to the engine's own heavy-static-object
+ *    configuration (mass >= 99998 path in CObjectData::SetObjectData:
+ *    (flags & ~0xE) | 0xC = bDisableCollisionForce | bit3). Bit 3 selects
+ *    the 1-body path in CPhysical::ProcessCollisionSectorList — friction
+ *    scaled by the normal-impact impulse exactly like buildings — instead
+ *    of the 2-body path dynamic object.dat props get, where even a 1°
+ *    graze eats the FULL unscaled static friction and the object wakes up
+ *    (m_bIsStatic cleared) as a moving physics body. SA-MP object positions
+ *    are server-authoritative, so no server-visible behavior is lost.
+ * Idempotent; re-applied after every (re)creation since object.dat-driven
+ * setup may overwrite the flags.
+ */
+void CObject::ApplySampObjectPhysics()
+{
+	// offsets verified against both binaries: arm64 CPed::UpdatePosition
+	// reads contact+0x64 for the (flags & 0xC) == 0x4 clamp test, arm32
+	// (0x4a1cb4) reads contact+0x44 — the same word CObjectData::SetObjectData
+	// writes and ProcessCollisionSectorList branches on
+#if defined(__aarch64__) || defined(__x86_64__)
+	static_assert(offsetof(sa::CPhysical, m_nPhysicalFlags) == 0x64,
+		"physicalFlags must match the +0x64 read in arm64 CPed::UpdatePosition");
+#else
+	static_assert(offsetof(sa::CPhysical, m_nPhysicalFlags) == 0x44,
+		"physicalFlags must match the +0x44 read in arm32 CPed::UpdatePosition (0x4a1cb4)");
+#endif
+	if (!m_entity || IsEntityPlaceable(m_entity)) {
+		return;
+	}
+	m_entity->m_nFlags |= 0x80000000u;
+	m_entity->m_nPhysicalFlags = (m_entity->m_nPhysicalFlags & 0xFFFFFFF1u) | 0xCu;
 }
 
 void CObject::Detach()
@@ -396,7 +429,6 @@ void CObject::Process(float fElapsedTime)
 		if (!shouldBeVisible) {
 			if (!m_bTimedHidden) {
 				m_bTimedHidden = true;
-				RemoveFromRepeatSector();
 				m_entity->Remove();
 				SetCollisionChecking(false);
 			}
@@ -599,16 +631,6 @@ void CObject::Process(float fElapsedTime)
 				|| pos.y > 3000.0f || pos.y < -3000.0f;
 	}
 
-	// inject LAST — the moving path above calls UpdateMatrix
-	// (CWorld::Remove/Add), which strips our sector records mid-tick, and
-	// CPhysical::Add rejects the OOB re-add; running the injection after it
-	// keeps the entity collidable through the next engine collision pass.
-	// Reached by attached objects too, so a fresh attach still unlinks
-	// stale records.
-	if (!m_bTimedHidden && m_entity && m_entity->m_pRwObject
-			&& (m_bForceRender || !m_aInjectedInfo.empty())) {
-		EnsureRepeatSector();
-	}
 }
 
 /**
@@ -666,7 +688,6 @@ void CObject::SetRotation(sa::CVector* vecRotation)
 		m_vecRotation.y = vecRotation->y;
 		m_vecRotation.z = vecRotation->z;
 		if (m_bTimedHidden) {
-			RemoveFromRepeatSector();
 			m_entity->Remove();
 			SetCollisionChecking(false);
 		} else if (m_bForceRender) {
@@ -774,7 +795,6 @@ bool CObject::SwapGtaModel(int iNewGtaModel)
 		eng::fn::CColStore_RemoveRef(m_iPinnedColSlot);
 		m_iPinnedColSlot = -1;
 	}
-	RemoveFromRepeatSector();
 
 	const int oldModel = m_iModel;
 	ScriptCommand(&destroy_object, m_gtaId);
@@ -821,9 +841,10 @@ bool CObject::SwapGtaModel(int iNewGtaModel)
 	s_liveObjectByEntity[m_entity] = this;
 
 	EnsureRwObject();
+	ApplySampObjectPhysics();
 	RwMatrix mat = m_entity->GetMatrix().ToRwMatrix();
 	mat.pos = pos;
-	m_entity->SetMatrix(mat);
+	UpdateMatrix(mat);
 	SetRotation(&rot);
 
 	if (m_bForceRender || m_fDrawDistance > 250.0f) {
@@ -849,7 +870,6 @@ bool CObject::SwapGtaModel(int iNewGtaModel)
 		m_bTimedHidden = false;
 	}
 	if (m_bTimedHidden) {
-		RemoveFromRepeatSector();
 		m_entity->Remove();
 		SetCollisionChecking(false);
 	}
