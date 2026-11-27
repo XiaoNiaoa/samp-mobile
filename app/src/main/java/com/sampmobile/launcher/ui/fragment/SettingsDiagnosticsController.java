@@ -199,13 +199,22 @@ final class SettingsDiagnosticsController {
                 sb.append("\n");
             }
             sb.append(I18n.tr("--- 最近一次客户端运行记录 (")).append(latest.getName()).append(") ---\n");
-            sb.append(readFileTail(latest, 160));
+            String latestTail = readFileTail(latest, 160);
+            boolean latestEmpty = latestTail.trim().isEmpty();
+            if (latestEmpty) {
+                sb.append(I18n.tr("（该日志文件无内容：客户端进程在写出首条日志前即终止，死亡点位于 native 初始化极早期）\n"));
+            } else {
+                sb.append(latestTail);
+            }
 
             // LMK / vendor kills leave no crash file — the evidence is the memory
             // ramp in the session that died. When the newest log reports an unclean
             // previous exit, pull the error lines and tail of the previous log too.
+            // An empty newest log means the process died before its first flush —
+            // the previous session is then the only available evidence, so include
+            // it even without the unclean-exit marker line.
             File previous = findPreviousClientLog(logcatDir, latest);
-            if (previous != null && containsLine(latest, "did not exit cleanly")) {
+            if (previous != null && (latestEmpty || containsLine(latest, "did not exit cleanly"))) {
                 List<String> prevCrashes = extractCrashAndErrorLines(previous);
                 if (!prevCrashes.isEmpty()) {
                     sb.append(I18n.tr("\n--- 上次异常终止会话的异常摘要 (")).append(previous.getName()).append(") ---\n");
@@ -338,12 +347,17 @@ final class SettingsDiagnosticsController {
             StatFs stat = new StatFs(extDir.getAbsolutePath());
             freeMB = (stat.getAvailableBlocksLong() * stat.getBlockSizeLong()) / (1024 * 1024);
         }
+        long pageSizeKb = -1;
+        try {
+            pageSizeKb = android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE) / 1024;
+        } catch (Throwable ignored) {
+        }
         ClientSettings settings = ClientSettings.loadLauncher(appCtx);
         return String.format(Locale.US,
-                I18n.tr("版本: v%s (%s) | 设备: %s %s | 系统: Android %s | 剩余空间: %d MB\n")
+                I18n.tr("版本: v%s (%s) | 设备: %s %s | 系统: Android %s (SDK %d) | 页大小: %dKB | 剩余空间: %d MB\n")
                 + I18n.tr("模组开关: Modloader=%b, AML=%b, JPatch=%b, MonetLoader=%b, CLEO=%b"),
                 BuildConfig.VERSION_NAME, abi,
-                Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, freeMB,
+                Build.MANUFACTURER, Build.MODEL, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, pageSizeKb, freeMB,
                 settings.getBoolean("modloader"),
                 settings.getBoolean("aml_scripts"),
                 settings.getBoolean("jpatch_enabled"),

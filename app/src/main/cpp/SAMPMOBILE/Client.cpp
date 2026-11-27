@@ -156,6 +156,16 @@ void init_logger(const std::string& gameDir)
 	}
 }
 
+// One-time boot progress marker: flushes buffered log lines to disk so a
+// process dying mid-boot leaves its last completed milestone in the file log
+// instead of a seemingly empty file (spdlog buffers everything below warn).
+static inline void bootMilestoneFlush()
+{
+	if (auto logger = spdlog::default_logger()) {
+		logger->flush();
+	}
+}
+
 static bool g_bGameStarted = false;
 volatile pid_t g_gameThreadTid = -1;
 std::atomic<bool> g_processRan{false};
@@ -317,6 +327,7 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	crash_set_report_dir(gameDir.c_str());
 
 	spdlog::info("Initializing SAMPMOBILE client...");
+	bootMilestoneFlush();
 
 	// Session liveness marker: written at startup, deleted only on intentional exit
 	// (Java exitGame/onDestroy). A leftover means crash / LMK / vendor kill.
@@ -378,6 +389,7 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	// Install after Crashlytics so we chain to debuggerd / Crashlytics cleanly without clobbering
 	installFatalSignalHandlers();
 	startMemoryTelemetryThread();
+	bootMilestoneFlush();
 
 	samp_version = Settings::sampVersionName();
 	samp_netgame = Settings::sampNetgameVersion();
@@ -394,11 +406,14 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 
 	spdlog::info("libGTASA.so loaded at 0x{:X}", g_saSym->GetLibAddr());
 	g_gtasaLibBase = g_saSym->GetLibAddr();
+	bootMilestoneFlush();
 
 	if (!eng::resolveAll()) {
 		spdlog::error("Aborting client initialization due to missing required libGTASA.so symbols!");
 		return;
 	}
+	spdlog::info("libGTASA.so symbols resolved");
+	bootMilestoneFlush();
 
 	char str[100];
 	snprintf(str, sizeof(str), "0x%llx", (unsigned long long) g_saSym->GetLibAddr());
@@ -409,6 +424,8 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 
 	Hooks::install();
 	Patches::apply();
+	spdlog::info("hooks and patches applied");
+	bootMilestoneFlush();
 
 	MultiTouch::initialize();
 	patches::dumpToLog();
@@ -416,6 +433,8 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	pGame = new Game();
 
 	ClientSubsystems::onPostBootInit();
+	spdlog::info("game object constructed, boot handoff");
+	bootMilestoneFlush();
 
 	// Boot watchdog: every 5s log boot progress; if no frame was rendered
 	// after ~15s (boot stall), dump all native game threads via SIGUSR2.
