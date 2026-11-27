@@ -285,7 +285,7 @@ static void installFatalSignalHandlers()
 	};
 	sigemptyset(&sig_action.sa_mask);
 	sig_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-	for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE}) {
+	for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE, SIGTRAP, SIGSYS}) {
 		sigaction(sig, &sig_action, &s_prevFatalAction[sig]);
 	}
 }
@@ -325,6 +325,11 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 
 	init_logger(gameDir);
 	crash_set_report_dir(gameDir.c_str());
+
+	// Install fatal handlers as early as possible: anything dying before this point
+	// leaves no crash file at all. (Previously installed after Crashlytics init —
+	// that whole middle section was a crash-file blind spot.)
+	installFatalSignalHandlers();
 
 	spdlog::info("Initializing SAMPMOBILE client...");
 	bootMilestoneFlush();
@@ -382,12 +387,17 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	Settings::initialize();
 	Encoding::setCharset(Settings::charset());
 
-	if (firebase::crashlytics::Initialize()) {
-		spdlog::info("Crashlytics initialized");
-		firebase::crashlytics::SetUserId(Settings::nick());
-	}
-	// Install after Crashlytics so we chain to debuggerd / Crashlytics cleanly without clobbering
-	installFatalSignalHandlers();
+	// Pinpoint flush: if the process dies in Settings::initialize or below, the
+	// buffered info lines above only reach disk once execution passes this point.
+	bootMilestoneFlush();
+
+	// Firebase Crashlytics NDK is intentionally NOT initialized: google-services.json
+	// is absent from every build (tests/check.py enforces it), so reports have no
+	// upload path and the native trampoline handler is pure dead weight — worse, its
+	// low-level signal/stack manipulation is a device-compat liability (prime suspect
+	// in the Android-16 early-boot death window). The project's own crash chain
+	// (crash_* files + feedback bundle) replaced it. Restore only if firebase is ever
+	// actually configured.
 	startMemoryTelemetryThread();
 	bootMilestoneFlush();
 
@@ -417,7 +427,7 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 
 	char str[100];
 	snprintf(str, sizeof(str), "0x%llx", (unsigned long long) g_saSym->GetLibAddr());
-	firebase::crashlytics::SetCustomKey("libGTASA.so", str);
+	(void) str; // firebase crashlytics usage removed (see below)
 
 	sa::Initialize();
 	ClientSubsystems::onPreHooksInit(game_dir);

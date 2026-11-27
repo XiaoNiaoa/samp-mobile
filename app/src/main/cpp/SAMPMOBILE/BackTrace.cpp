@@ -3,6 +3,7 @@
 
 #include <spdlog/spdlog.h>
 #include <android/log.h>
+#include <sys/prctl.h>
 #include <sys/system_properties.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -370,18 +371,13 @@ void crash_breadcrumb(int signal, siginfo_t* info, void* ctx)
 	appendDecAsync(report, sizeof(report), rpos, tid);
 
 	{
-		int cfd = open("/proc/self/comm", O_RDONLY);
-		if (cfd >= 0) {
-			char cbuf[64] = {};
-			ssize_t cn = read(cfd, cbuf, sizeof(cbuf) - 1);
-			close(cfd);
-			if (cn > 0) {
-				size_t clen = 0;
-				while (clen < (size_t) cn && cbuf[clen] != '\n' && cbuf[clen] != '\0') ++clen;
-				cbuf[clen] = '\0';
-				appendStrAsync(report, sizeof(report), rpos, " comm: ");
-				appendStrAsync(report, sizeof(report), rpos, cbuf);
-			}
+		// Use prctl(PR_GET_NAME) so we capture the crashing thread's own name
+		// (e.g. "NvEvent" vs "main"), not /proc/self/comm which is always the main thread.
+		char cbuf[32] = {};
+		if (prctl(PR_GET_NAME, cbuf, 0, 0, 0) == 0 && cbuf[0] != '\0') {
+			cbuf[sizeof(cbuf) - 1] = '\0';
+			appendStrAsync(report, sizeof(report), rpos, " comm: ");
+			appendStrAsync(report, sizeof(report), rpos, cbuf);
 		}
 	}
 
@@ -393,6 +389,8 @@ void crash_breadcrumb(int signal, siginfo_t* info, void* ctx)
 		case SIGBUS:  appendStrAsync(report, sizeof(report), rpos, " (SIGBUS)"); break;
 		case SIGILL:  appendStrAsync(report, sizeof(report), rpos, " (SIGILL)"); break;
 		case SIGFPE:  appendStrAsync(report, sizeof(report), rpos, " (SIGFPE)"); break;
+		case SIGTRAP: appendStrAsync(report, sizeof(report), rpos, " (SIGTRAP)"); break;
+		case SIGSYS:  appendStrAsync(report, sizeof(report), rpos, " (SIGSYS)"); break;
 		default: break;
 	}
 	appendStrAsync(report, sizeof(report), rpos, " code: ");
@@ -402,7 +400,14 @@ void crash_breadcrumb(int signal, siginfo_t* info, void* ctx)
 			appendStrAsync(report, sizeof(report), rpos, " (SEGV_MAPERR)");
 		} else if (info->si_code == SEGV_ACCERR) {
 			appendStrAsync(report, sizeof(report), rpos, " (SEGV_ACCERR)");
+		} else if (info->si_code == 8) {
+			appendStrAsync(report, sizeof(report), rpos, " (SEGV_MTEAERR)");
+		} else if (info->si_code == 9) {
+			appendStrAsync(report, sizeof(report), rpos, " (SEGV_MTESERR)");
 		}
+	} else if (signal == SIGSYS && info) {
+		appendStrAsync(report, sizeof(report), rpos, " syscall: ");
+		appendDecAsync(report, sizeof(report), rpos, info->si_syscall);
 	}
 	appendStrAsync(report, sizeof(report), rpos, "\nfault_addr: 0x");
 	appendHexAsync(report, sizeof(report), rpos, faultAddr);
