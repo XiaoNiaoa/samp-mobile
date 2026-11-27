@@ -474,8 +474,8 @@ bool validateGeometry(const uint8_t* data, const ChunkView& geom, DffValidationR
 			}
 			for (size_t f = 0; f < 4u; ++f) {
 				const float v = readLEFloat(data + cur + f * 4u);
-				if (!std::isfinite(v) || std::fabs(v) > 1.0e6f) {
-					err = "Geometry morph bounding sphere non-finite/extreme";
+				if (!std::isfinite(v)) {
+					err = "Geometry morph bounding sphere non-finite";
 					return false;
 				}
 			}

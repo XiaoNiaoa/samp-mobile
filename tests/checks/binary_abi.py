@@ -210,8 +210,8 @@ def _resolve_compiled_libs(apk_path: Optional[Path], tmp_dir: Path) -> Dict[str,
             if lib in found[abi]:
                 continue
             for cand in (
-                REPO_ROOT / f"app/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/{abi}/{lib}",
-                REPO_ROOT / f"app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/{abi}/{lib}",
+                REPO_ROOT / f"build/app/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/{abi}/{lib}",
+                REPO_ROOT / f"build/app/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/{abi}/{lib}",
             ):
                 if cand.is_file():
                     found[abi][lib] = cand

@@ -12,7 +12,7 @@
 | 入口 | 用途 |
 |---|---|
 | `menu.py` | 交互式双语菜单（由仓库根 `build_tool.bat` 双击调起，启动时选语言并记住，菜单内也可切换）：环境自检（含 `local.properties` 一键写入）→ 四个操作「一体包 / 普通 APK / 数据 zip / 提取运行库」→ 自动调用下面的脚本与 `prepare_gtasa.py`；PC GTA:SA 路径检测不到时提示输入一次并记住（`dist/packaging-config.json`） |
-| `build_bundled_apk.py` | **一体包**：游戏数据重压缩后嵌入 APK assets，产出安装即玩的 release APK 到 `build/apk/`。首启一键解压，无需联网、无需手动导 zip |
+| `build_bundled_apk.py` | **一体包**：游戏数据重压缩后嵌入 APK assets，产出安装即玩的 APK 到 `build/apk/`（`--build-type release|debug` 可选，默认 release；两者都用 friends 测试签名，可互相覆盖安装）。首启一键解压，无需联网、无需手动导 zip |
 | `build_split.py` | **分开构建**：普通 APK（release/debug 可选）产出到 `build/apk/`，独立数据 zip 产出到 `build/gamedata/`；适合愿意手动「设置 → 文件验证 → 本地导入」的场景 |
 | `pkgutil.py` | 两个入口脚本共用的内部模块：路径常量、JDK 检测、测试签名（`dist/friends.jks`）、用户配置、gradle 调用、数据包构建驱动。**不是入口，勿直接运行** |
 
@@ -22,6 +22,7 @@
 
 ```
 build/apk/          最终 APK
+build/app/          gradle 模块输出（原 app/build，已重定向；app/ 只留源码）
 build/gamedata/     数据包 zip 产物 + .cache/（一体包 deflate 重压缩缓存）
 build/bundled-apk/  一体包 assets overlay 暂存
 dist/               纯输入区：gtasa*.apk、obb、字体 + friends.jks（测试签名，勿删）+ packaging-config.json（用户填过的路径）

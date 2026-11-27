@@ -168,7 +168,7 @@ def run_gradle(task: str, java_home: str, sign: bool, extra_args: list[str] | No
 
 
 def gradle_apk_path(build_type: str) -> Path:
-    return REPO_ROOT / "app" / "build" / "outputs" / "apk" / build_type / "samp.apk"
+    return REPO_ROOT / "build" / "app" / "outputs" / "apk" / build_type / "samp.apk"
 
 
 # ---------------------------------------------------------------------- data zip

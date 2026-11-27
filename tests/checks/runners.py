@@ -73,7 +73,7 @@ def run_android_lint(r: Runner, online: bool = False) -> None:
         text=True,
         errors="ignore",
     )
-    report_xml = REPO_ROOT / "app/build/reports/lint-results-debug.xml"
+    report_xml = REPO_ROOT / "build/app/reports/lint-results-debug.xml"
     if not report_xml.is_file():
         out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
         if not online and "available for offline mode" in out:
@@ -104,7 +104,7 @@ def run_android_lint(r: Runner, online: bool = False) -> None:
             warnings += 1
 
     if not errors:
-        r.ok("Android Lint (lintDebug)", f"0 errors, {warnings} warnings (see app/build/reports/lint-results-debug.html)")
+        r.ok("Android Lint (lintDebug)", f"0 errors, {warnings} warnings (see build/app/reports/lint-results-debug.html)")
     else:
         sample = ", ".join(errors[:6]) + (f" (+{len(errors) - 6} more)" if len(errors) > 6 else "")
         r.warn("Android Lint (lintDebug)", f"{len(errors)} errors, {warnings} warnings: {sample}")

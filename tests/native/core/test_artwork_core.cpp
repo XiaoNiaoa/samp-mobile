@@ -134,7 +134,8 @@ std::vector<uint8_t> buildValidCol3(uint32_t colFourCc = 0x334C4F43u)
 }
 
 std::vector<uint8_t> buildMinimalDff(const char* texName, uint32_t colChunkId, uint32_t colFourCc,
-	const char* nodeName = nullptr, const std::vector<uint8_t>* geomExtChild = nullptr)
+	const char* nodeName = nullptr, const std::vector<uint8_t>* geomExtChild = nullptr,
+	float morphSphereRadius = 1.0f)
 {
 	// Clump struct: numAtomics=1, numLights=0, numCameras=0
 	std::vector<uint8_t> clumpStruct;
@@ -200,7 +201,7 @@ std::vector<uint8_t> buildMinimalDff(const char* texName, uint32_t colChunkId, u
 	pushF32(gStruct, 0.0f);
 	pushF32(gStruct, 0.0f);
 	pushF32(gStruct, 0.0f);
-	pushF32(gStruct, 1.0f);
+	pushF32(gStruct, morphSphereRadius);
 	pushLE32(gStruct, 1);
 	pushLE32(gStruct, 0);
 	// 3 vertices
@@ -689,6 +690,31 @@ static void testDffValidatorAndColExtraction()
 		CHECK(!res.hasEmbeddedColChunk);
 		CHECK(res.colFormat == ColFormat::None);
 		CHECK(res.sanitizedDff.empty());
+	}
+
+	// 3b. Huge-but-finite morph bounding sphere radius (real-world exporter artifact, e.g. big map
+	// objects with radius ~1e25) must be ACCEPTED: RW uses it only for culling, and PC clients load
+	// these models fine. Only non-finite values indicate corruption.
+	{
+		auto dff = buildMinimalDff("custom_wall", 0, 0, nullptr, nullptr, 5.8e25f);
+		auto res = validateAndPrepareDff(dff.data(), dff.size(), true);
+		CHECK(res.ok);
+
+		auto nanDff = buildMinimalDff("custom_wall", 0, 0, nullptr, nullptr, 1.0f);
+		// patch radius (last of the 4 sphere floats) to NaN -> still rejected
+		// locate morph sphere: search for the exact byte sequence of the 3 zero center floats + radius 1.0f
+		const uint8_t needle[16] = {
+			0,0,0,0, 0,0,0,0, 0,0,0,0,
+			0x00, 0x00, 0x80, 0x3F, // 1.0f
+		};
+		size_t pos = std::string(reinterpret_cast<const char*>(nanDff.data()), nanDff.size()).find(
+			std::string(reinterpret_cast<const char*>(needle), sizeof(needle)));
+		CHECK(pos != std::string::npos);
+		nanDff[pos + 12] = 0xFF;
+		nanDff[pos + 13] = 0xFF;
+		nanDff[pos + 14] = 0xFF;
+		nanDff[pos + 15] = 0x7F; // NaN
+		CHECK(!validateAndPrepareDff(nanDff.data(), nanDff.size(), true).ok);
 	}
 
 	// 4. Truncated / corrupt DFF and oversized rwID_NODENAME (>=24B) must be rejected cleanly

@@ -19,11 +19,14 @@ What the script does per edition:
      sent over chat apps.
   3. Prepares an assets overlay (build/bundled-apk/overlay-<edition>/gamedata/)
      with bundle.gdz + bundle.json metadata.
-  4. Builds appRelease with -PsampBundleAssets=<overlay> signed by the
-     throwaway test key dist/friends.jks (generated once, reused forever so
-     later builds keep installing as updates over previous ones).
+  4. Builds release (or debug with --build-type debug) with
+     -PsampBundleAssets=<overlay> signed by the throwaway test key
+     dist/friends.jks (generated once, reused forever so later builds keep
+     installing as updates over previous ones; debug builds use the same key
+     for the same reason).
   5. Copies the result to build/apk/samp-mobile-<version>-<edition>-bundled.apk
-     and verifies the bundle inside is present and STORED (not re-compressed).
+     (…-bundled-debug.apk for debug) and verifies the bundle inside is present
+     and STORED (not re-compressed).
 
 The launcher side (already in the app): on first launch with missing game data,
 MainActivity offers one-tap extraction of the embedded bundle, streaming it
@@ -205,6 +208,10 @@ def main() -> None:
                     help="regenerate the source data zips via build_gamedata.py even if they exist")
     ap.add_argument("--recompress", action="store_true",
                     help="force the DEFLATE recompression pass even if the .gdz cache looks fresh")
+    ap.add_argument("--build-type", choices=["release", "debug"], default="release",
+                    help="gradle build type (default: release); debug keeps the app debuggable "
+                         "and is still signed with the shared test key so it installs as an "
+                         "update over release builds")
     args = ap.parse_args()
 
     editions = ["lite", "full"] if args.edition == "both" else [args.edition]
@@ -225,14 +232,16 @@ def main() -> None:
         src_zip = ensure_data_zip(edition, args.pc_samp, args.rebuild, TAG)
         gdz, stats = recompress_to_gdz(edition, src_zip, force=args.recompress)
         overlay = prepare_overlay(edition, gdz, stats)
-        run_gradle("assembleRelease", java_home, sign=True,
+        task = "assembleRelease" if args.build_type == "release" else "assembleDebug"
+        run_gradle(task, java_home, sign=True,
                    extra_args=[f"-PsampBundleAssets={overlay}"], tag=TAG)
-        apk = gradle_apk_path("release")
+        apk = gradle_apk_path(args.build_type)
         if not apk.is_file():
             fail(f"{edition}: expected output missing: {apk}", TAG)
         verify_apk(apk, edition)
 
-        final = out_dir / f"samp-mobile-{version}-{edition}-bundled.apk"
+        suffix = "-debug" if args.build_type == "debug" else ""
+        final = out_dir / f"samp-mobile-{version}-{edition}-bundled{suffix}.apk"
         shutil.copyfile(apk, final)
         size_mb = final.stat().st_size / 1048576
         log(f"{edition}: FINAL APK -> {final} ({size_mb:.0f} MB)", TAG)

@@ -38,8 +38,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Unified objective verification pipeline for SA-MP Mobile.")
     parser.add_argument(
         "--apk",
-        default="app/build/outputs/apk/debug/samp.apk",
-        help="Target APK path (default: app/build/outputs/apk/debug/samp.apk)",
+        default="build/app/outputs/apk/debug/samp.apk",
+        help="Target APK path (default: build/app/outputs/apk/debug/samp.apk)",
     )
     parser.add_argument("--full", action="store_true", help="Run all 5 stages (including C++/JVM tests)")
     parser.add_argument(

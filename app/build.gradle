@@ -29,6 +29,11 @@ if (!bundleAssetsDir.isEmpty() && !file(bundleAssetsDir).isDirectory()) {
     throw new GradleException("sampBundleAssets points at a missing directory: " + bundleAssetsDir)
 }
 
+// Redirect this module's build output into the repo-level build/ tree, so app/
+// only holds sources and everything generated lives under build/ alongside the
+// packaging artifacts (build/app is what used to be app/build).
+layout.buildDirectory.set(rootProject.file("build/app"))
+
 android {
     namespace "com.sampmobile.launcher"
     compileSdk 35
@@ -92,7 +97,13 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
-            // Uses the standard Android debug keystore by default for zero-config fresh-machine builds.
+            // When the shared test key is configured (packaging scripts set the env vars),
+            // sign debug builds with it too: test players can then install debug and release
+            // builds over each other as updates instead of uninstalling first. Fresh machines
+            // without the key still fall back to the standard Android debug keystore.
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

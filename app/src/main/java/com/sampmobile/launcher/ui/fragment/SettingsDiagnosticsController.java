@@ -63,6 +63,10 @@ final class SettingsDiagnosticsController {
                         crashHits += extractCrashAndErrorLines(all[i]).size();
                     }
                 }
+                File[] crashFiles = logcatDir.listFiles((d, n) -> n.startsWith("crash_") && n.endsWith(".log"));
+                if (crashFiles != null && crashFiles.length > 0) {
+                    crashHits += crashFiles.length;
+                }
             }
 
             final int finalLogCount = logFileCount;
@@ -175,6 +179,15 @@ final class SettingsDiagnosticsController {
         sb.append(I18n.tr("========== SA-MP Mobile 故障反馈诊断信息 ==========\n"));
         sb.append(buildDeviceSummaryLine(appCtx)).append("\n\n");
 
+        // Native crash reports are small self-contained files written by the
+        // fatal signal handler; include the newest ones verbatim.
+        List<File> crashFiles = findCrashReports(logcatDir);
+        for (File crashFile : crashFiles) {
+            sb.append(I18n.tr("--- 原生崩溃报告 (")).append(crashFile.getName()).append(") ---\n");
+            sb.append(readFileHead(crashFile, 120));
+            sb.append("\n");
+        }
+
         File latest = findLatestClientLog(logcatDir);
         if (latest != null && latest.exists()) {
             List<String> crashes = extractCrashAndErrorLines(latest);
@@ -187,8 +200,76 @@ final class SettingsDiagnosticsController {
             }
             sb.append(I18n.tr("--- 最近一次客户端运行记录 (")).append(latest.getName()).append(") ---\n");
             sb.append(readFileTail(latest, 160));
+
+            // LMK / vendor kills leave no crash file — the evidence is the memory
+            // ramp in the session that died. When the newest log reports an unclean
+            // previous exit, pull the error lines and tail of the previous log too.
+            File previous = findPreviousClientLog(logcatDir, latest);
+            if (previous != null && containsLine(latest, "did not exit cleanly")) {
+                List<String> prevCrashes = extractCrashAndErrorLines(previous);
+                if (!prevCrashes.isEmpty()) {
+                    sb.append(I18n.tr("\n--- 上次异常终止会话的异常摘要 (")).append(previous.getName()).append(") ---\n");
+                    for (String line : prevCrashes) {
+                        sb.append(line).append("\n");
+                    }
+                }
+                sb.append(I18n.tr("\n--- 上次异常终止会话的运行记录末尾 (")).append(previous.getName()).append(") ---\n");
+                sb.append(readFileTail(previous, 120));
+            }
         } else {
             sb.append(I18n.tr("尚未生成客户端运行日志记录。\n"));
+        }
+        return sb.toString();
+    }
+
+    private File findPreviousClientLog(File logcatDir, File latest) {
+        if (logcatDir == null || !logcatDir.exists() || latest == null) return null;
+        File[] files = logcatDir.listFiles((d, name) -> name.startsWith("client_") && name.endsWith(".log"));
+        if (files == null || files.length < 2) return null;
+        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (File f : files) {
+            if (!f.getName().equals(latest.getName())) return f;
+        }
+        return null;
+    }
+
+    private boolean containsLine(File file, String needle) {
+        if (file == null || !file.exists()) return false;
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            int scanned = 0;
+            while ((line = br.readLine()) != null && scanned < 400) {
+                if (line.contains(needle)) return true;
+                scanned++;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private List<File> findCrashReports(File logcatDir) {
+        List<File> result = new ArrayList<>();
+        if (logcatDir == null || !logcatDir.exists()) return result;
+        File[] files = logcatDir.listFiles((d, name) -> name.startsWith("crash_") && name.endsWith(".log"));
+        if (files == null) return result;
+        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (int i = 0; i < Math.min(files.length, 3); i++) {
+            result.add(files[i]);
+        }
+        return result;
+    }
+
+    private String readFileHead(File file, int maxLines) {
+        if (file == null || !file.exists()) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            int count = 0;
+            while ((line = br.readLine()) != null && count < maxLines) {
+                sb.append(line).append('\n');
+                count++;
+            }
+        } catch (Exception ignored) {
         }
         return sb.toString();
     }
@@ -233,7 +314,7 @@ final class SettingsDiagnosticsController {
                         || lower.contains("backtrace") || lower.contains("[error]")
                         || lower.contains("[critical]") || lower.contains("sigsegv")
                         || lower.contains("sigabrt") || lower.contains("last script command")
-                        || lower.contains("last rendered object");
+                        || lower.contains("last rendered object") || lower.contains("(pressure)");
                 if (hit) {
                     result.add(line);
                     contextAfterHit = 10;

@@ -1,7 +1,10 @@
 #include <atomic>
+#include <algorithm>
+#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <dirent.h>
@@ -48,6 +51,10 @@
 #include "Cef/CefBrowser.h"
 #include "Cef/CefSession.h"
 #include "Crashlytics.h"
+#include "Game/Artwork/ArtworkTelemetry.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 JavaVM* Client::java_vm = nullptr;
 std::string Client::game_dir;
@@ -156,6 +163,93 @@ std::atomic<bool> g_worldReady{false};
 
 static struct sigaction s_prevFatalAction[32]{};
 
+// Memory telemetry helpers (normal thread context — stdio is fine here).
+// Returns the kB value of a "Key:  12345 kB" style /proc field, or -1.
+static long readProcKbField(const char* path, const char* key)
+{
+	FILE* f = fopen(path, "r");
+	if (!f) return -1;
+	char line[256];
+	long result = -1;
+	const size_t keyLen = strlen(key);
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, key, keyLen) == 0) {
+			const char* p = line + keyLen;
+			while (*p == ' ' || *p == '\t') ++p;
+			result = strtol(p, nullptr, 10);
+			break;
+		}
+	}
+	fclose(f);
+	return result;
+}
+
+// Periodic memory telemetry. The sampler exists primarily to make LMK / vendor
+// kills diagnosable: those leave zero trace, but a memory ramp visible in the
+// file log is almost as good as a crash report. Lines are flushed after every
+// write (cheap at this cadence) so the curve survives process death; under
+// pressure the level escalates to warn, which both forces spdlog's flush_on
+// and keeps the samples in the feedback bundle's tail extraction.
+static void startMemoryTelemetryThread()
+{
+	std::thread([]() {
+		long lastLoggedRssKb = -1;
+		size_t lastLoggedArtBytes = 0;
+		size_t lastLoggedArtSlots = 0;
+		uint64_t sinceLog = 0;
+		for (;;) {
+			sleep(5);
+			++sinceLog;
+
+			const long rssKb = readProcKbField("/proc/self/status", "VmRSS:");
+			const long availKb = readProcKbField("/proc/meminfo", "MemAvailable:");
+			if (rssKb < 0 && availKb < 0) {
+				continue;
+			}
+
+			const size_t artTxdBytes = artwork::g_telemetryTxdBytes.load(std::memory_order_relaxed);
+			const size_t artSlots = artwork::g_telemetryLoadedSlots.load(std::memory_order_relaxed);
+			const size_t artTxds = artwork::g_telemetryLoadedTxds.load(std::memory_order_relaxed);
+
+			const bool pressure =
+					(availKb >= 0 && availKb < 500L * 1024L) ||
+					(rssKb >= 0 && rssKb > 1600L * 1024L);
+
+			// Activity-adaptive sampling: log every 5s while memory or artwork
+			// accounting is actively moving (join bursts, VW switches, streaming
+			// heavy areas — exactly the windows where LMK strikes), fall back to
+			// a 60s heartbeat when the process is stable. Time-based join windows
+			// misfire because heavy loading often starts minutes after joining.
+			const bool rssMoved = (lastLoggedRssKb < 0) ||
+					(rssKb >= 0 && (rssKb - lastLoggedRssKb > 8L * 1024L ||
+							lastLoggedRssKb - rssKb > 8L * 1024L));
+			const bool artMoved = (artTxdBytes != lastLoggedArtBytes) || (artSlots != lastLoggedArtSlots);
+			const bool heartbeatDue = sinceLog >= 12; // 60s
+			if (!pressure && !rssMoved && !artMoved && !heartbeatDue) {
+				continue;
+			}
+
+			lastLoggedRssKb = rssKb;
+			lastLoggedArtBytes = artTxdBytes;
+			lastLoggedArtSlots = artSlots;
+			sinceLog = 0;
+
+			if (pressure) {
+				spdlog::warn("mem: rss={}MB avail={}MB artwork={}MB/{}slots/{}txd (PRESSURE)",
+						rssKb / 1024, availKb / 1024,
+						artTxdBytes / (1024 * 1024), artSlots, artTxds);
+			} else {
+				spdlog::info("mem: rss={}MB avail={}MB artwork={}MB/{}slots/{}txd",
+						rssKb / 1024, availKb / 1024,
+						artTxdBytes / (1024 * 1024), artSlots, artTxds);
+				if (auto logger = spdlog::default_logger()) {
+					logger->flush();
+				}
+			}
+		}
+	}).detach();
+}
+
 static void installFatalSignalHandlers()
 {
 	struct sigaction sig_action{};
@@ -220,8 +314,49 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	sigaction(SIGUSR2, &dump_action, nullptr);
 
 	init_logger(gameDir);
+	crash_set_report_dir(gameDir.c_str());
 
 	spdlog::info("Initializing SAMPMOBILE client...");
+
+	// Session liveness marker: written at startup, deleted only on intentional exit
+	// (Java exitGame/onDestroy). A leftover means crash / LMK / vendor kill.
+	{
+		const std::string markerPath = gameDir + "logcat/session_alive";
+		if (access(markerPath.c_str(), F_OK) == 0) {
+			spdlog::error("last session did not exit cleanly (crash, LMK or vendor kill suspected)");
+		}
+		int mfd = open(markerPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (mfd >= 0) {
+			char mbuf[64];
+			int mlen = snprintf(mbuf, sizeof(mbuf), "pid=%d\n", getpid());
+			if (mlen > 0) {
+				ssize_t w = write(mfd, mbuf, static_cast<size_t>(mlen));
+				(void) w;
+			}
+			close(mfd);
+		}
+
+		// Prune old crash report files, keeping the newest few (they are tiny
+		// but unbounded accumulation would eventually spam the logcat dir).
+		const std::string logcatDir = gameDir + "logcat";
+		DIR* dir = opendir(logcatDir.c_str());
+		if (dir) {
+			std::vector<std::string> crashFiles;
+			struct dirent* ent;
+			while ((ent = readdir(dir)) != nullptr) {
+				if (strncmp(ent->d_name, "crash_", 6) == 0) {
+					crashFiles.emplace_back(ent->d_name);
+				}
+			}
+			closedir(dir);
+			if (crashFiles.size() > 5) {
+				std::sort(crashFiles.begin(), crashFiles.end(), std::greater<>());
+				for (size_t i = 5; i < crashFiles.size(); ++i) {
+					unlink((logcatDir + "/" + crashFiles[i]).c_str());
+				}
+			}
+		}
+	}
 
 	java_vm = g_vm;
 	game_dir = gameDir;
@@ -242,6 +377,7 @@ void Client::initialize(const std::string& gameDir, bool offlineMode)
 	}
 	// Install after Crashlytics so we chain to debuggerd / Crashlytics cleanly without clobbering
 	installFatalSignalHandlers();
+	startMemoryTelemetryThread();
 
 	samp_version = Settings::sampVersionName();
 	samp_netgame = Settings::sampNetgameVersion();

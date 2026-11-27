@@ -354,6 +354,16 @@ public class SAMP extends GTASA {
         }
         // 拆除全部 omp-cef WebView，避免跨 Activity 生命周期泄漏
         CefManager.shutdown();
+        // Reaching onDestroy means an orderly teardown (intentional exit or
+        // user swipe-away), so clear the session-alive marker before dying;
+        // crash / LMK / vendor kill never get here and leave the marker behind.
+        try {
+            File extDir = getExternalFilesDir(null);
+            if (extDir != null) {
+                new File(extDir, "logcat/session_alive").delete();
+            }
+        } catch (Throwable ignored) {
+        }
         // Kill the isolated :game process BEFORE NvEventQueueActivity.onDestroy() invokes
         // quitAndWait() (10s Main-Looper wait + OS_ApplicationEvent UAF) & systemCleanup().
         android.os.Process.killProcess(android.os.Process.myPid());

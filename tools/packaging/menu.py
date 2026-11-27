@@ -353,7 +353,14 @@ def bundled_flow(info: dict) -> None:
     editions = {"1": ["lite"], "2": ["full"], "3": ["lite", "full"]}[choice]
     edition_arg = {"1": "lite", "2": "full", "3": "both"}[choice]
 
-    extra = ["--edition", edition_arg]
+    print()
+    print(tr("apk_type"))
+    print(f"  1) {tr('apk_release')}")
+    print(f"  2) {tr('apk_debug')}")
+    bt = ask(tr("choose12"), ["1", "2"], default="1")
+    build_type = "release" if bt == "1" else "debug"
+
+    extra = ["--edition", edition_arg, "--build-type", build_type]
     if data_zip_missing(editions):
         pc = resolve_pc_samp(info)
         if pc:

@@ -835,6 +835,16 @@ public class MainActivity extends AppCompatActivity implements LauncherThemeMana
                 if (procs != null) {
                     for (android.app.ActivityManager.RunningAppProcessInfo info : procs) {
                         if (targetProc.equals(info.processName) && info.pid != android.os.Process.myPid()) {
+                            // The launcher is the intentional killer here (e.g. user
+                            // backgrounded the game and rejoins) — clear the session-alive
+                            // marker first so the next session doesn't misread this as a crash.
+                            try {
+                                java.io.File extDir = getExternalFilesDir(null);
+                                if (extDir != null) {
+                                    new java.io.File(extDir, "logcat/session_alive").delete();
+                                }
+                            } catch (Throwable ignored) {
+                            }
                             android.os.Process.killProcess(info.pid);
                             killed = true;
                         }
