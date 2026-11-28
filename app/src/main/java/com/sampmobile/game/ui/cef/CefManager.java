@@ -13,9 +13,12 @@ import android.os.Looper;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+
+import com.sampmobile.game.SAMP;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -518,6 +521,43 @@ public final class CefManager {
             Log.i(TAG, "browser " + id + " focus=" + focus
                     + " (any focused: " + isAnyBrowserFocused() + ")");
         });
+    }
+
+    /** 页面声明单块可交互区域（屏幕物理像素）。 */
+    public static void setBrowserTouchRegion(int id, int left, int top, int right, int bottom) {
+        post(() -> {
+            CefWebView view = find(id);
+            if (view == null) {
+                Log.w(TAG, "setBrowserTouchRegion: no browser " + id);
+                return;
+            }
+            view.setTouchRegion(left, top, right, bottom);
+        });
+    }
+
+    /** 页面声明多块可交互区域（CSV：left,top,right,bottom;...）。 */
+    public static void setBrowserTouchRegions(int id, String csv) {
+        post(() -> {
+            CefWebView view = find(id);
+            if (view == null) {
+                Log.w(TAG, "setBrowserTouchRegions: no browser " + id);
+                return;
+            }
+            view.setTouchRegionsCsv(csv);
+        });
+    }
+
+    /**
+     * 把 CEF 拆分出的非页面手指直接交给游戏现有的 Activity.onTouchEvent。
+     *
+     * 不新增 SAMP 入口、不改游戏核心：onTouchEvent 本来就会走
+     * GameInputArbiter + multiTouchEvent4Ex。只在 CEF 有焦点时借用。
+     */
+    static void dispatchGameTouch(MotionEvent event) {
+        Activity activity = sActivity.get();
+        if (activity instanceof SAMP) {
+            ((SAMP) activity).onTouchEvent(event);
+        }
     }
 
     public static void setBrowserLayer(int id, int layer) {

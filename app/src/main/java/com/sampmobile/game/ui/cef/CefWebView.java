@@ -307,11 +307,24 @@ final class CefWebView {
                 + " touch=" + (overlay.isPassThrough() ? "game" : "page"));
     }
 
+    /** 页面声明的单块可交互区域（屏幕物理像素）。 */
+    void setTouchRegion(int left, int top, int right, int bottom) {
+        if (destroyed) return;
+        overlay.setTouchRegion(left, top, right, bottom);
+    }
+
+    /** 页面声明的多块可交互区域（CSV：left,top,right,bottom;...）。 */
+    void setTouchRegionsCsv(String csv) {
+        if (destroyed) return;
+        overlay.setTouchRegionsCsv(csv);
+    }
+
     /**
      * 触摸归属：只有"可见 + 有焦点"的浏览器才消费触摸，其余一律放行给游戏。
      *
      * 这样全屏 HUD（CreateBrowser(focused=false)）不会压死虚拟摇杆，而服务端/页面显式
      * 要焦点时又能整屏接管——与 PC FocusManager 把鼠标锁进 CEF 的时机完全对应。
+     * 页面声明了 touchRegion 时，只有区域内的手指归 WebView。
      */
     private void applyTouchMode() {
         if (destroyed) return;
