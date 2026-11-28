@@ -36,6 +36,7 @@ OWN_LIBS = ("libSAMPMOBILE.so", "libSCAnd.so")
 # monetloader) are player-optional and load only when the corresponding toggle is
 # on, so they are reported informationally instead of failing the gate.
 ARM64_16K_REQUIRED = {
+    "libAML.so",
     "libBASS.so",
     "libbass_ssl.so",
     "libc++_shared.so",
@@ -509,10 +510,68 @@ def _check_compiled_binaries_and_jni(
         if linker_wrap_errors:
             r.fail("Android 16+ GlossHook LinkerInit wrap guard", "; ".join(linker_wrap_errors))
         elif linker_wrap_checked:
-            r.ok(
-                "Android 16+ GlossHook LinkerInit wrap guard",
-                f"{linker_wrap_checked} ABIs verified (_Z10LinkerInitv unreferenced by GlossInit / PLT)",
+            # Also verify dual-ABI prebuilt libAML.so never exposes unwrapped GlossHook
+            # Bionic linker hooks (LinkerInit / linker_hook / SoinfoFromHandle / GlossHookLinkerFunction).
+            aml_forbidden_syms = {
+                "_Z10LinkerInitv",
+                "_Z16SoinfoFromHandlePv",
+                "_Z11linker_hookv",
+                "_Z23GlossHookLinkerFunctionPKc20GlossLinkerFuncProxy",
+                "_Z23GlossHookLinkerFunctionPKc20GlossLinkerFuncProxyPPvS3_",
+            }
+            aml_checked = 0
+            for abi in ("arm64-v8a", "armeabi-v7a"):
+                aml_so = REPO_ROOT / "app/src/main/jniLibs" / abi / "libAML.so"
+                if not aml_so.is_file():
+                    continue
+                aml_checked += 1
+                aml_exports = set(_load_dynamic_exports(nm_bin, aml_so).keys())
+                leaked = sorted(aml_forbidden_syms & aml_exports)
+                if leaked:
+                    linker_wrap_errors.append(f"libAML.so [{abi}] still exports Bionic linker hooks: {', '.join(leaked)}")
+                aml_rel = subprocess.check_output(
+                    [str(readelf_bin), "-rW", str(aml_so)],
+                    text=True,
+                    errors="ignore",
+                )
+                for bad_sym in aml_forbidden_syms:
+                    if bad_sym in aml_rel:
+                        linker_wrap_errors.append(f"libAML.so [{abi}] still relocates {bad_sym}")
+
+            if linker_wrap_errors:
+                r.fail("Android 16+ GlossHook LinkerInit wrap guard", "; ".join(linker_wrap_errors))
+            else:
+                r.ok(
+                    "Android 16+ GlossHook LinkerInit wrap guard",
+                    f"libSAMPMOBILE.so ({linker_wrap_checked} ABIs) + libAML.so ({aml_checked} ABIs) verified free of Bionic linker hooks",
+                )
+
+        # Verify arm64 libGTASA.so ReallocAndFixupSuperBlock patch targets match exact original instructions
+        gtasa_arm64 = REPO_ROOT / "app/src/main/jniLibs/arm64-v8a/libGTASA.so"
+        if gtasa_arm64.is_file():
+            import struct
+
+            gtasa_bytes = gtasa_arm64.read_bytes()
+            expected_insns = (
+                (0x278E50, 0x8B29C108, "add x8, x8, w9, sxtw (embeddedPacket)"),
+                (0x278E60, 0x8B29C108, "add x8, x8, w9, sxtw (inputRequirements)"),
+                (0x278E70, 0x93407D29, "sxtw x9, w9 (nodes[] loop delta)"),
             )
+            insn_errors: List[str] = []
+            for off, exp, desc in expected_insns:
+                if off + 4 > len(gtasa_bytes):
+                    insn_errors.append(f"0x{off:X} out of bounds")
+                    continue
+                actual = struct.unpack_from("<I", gtasa_bytes, off)[0]
+                if actual != exp:
+                    insn_errors.append(f"0x{off:X} ({desc}): got 0x{actual:08X}, expected 0x{exp:08X}")
+            if insn_errors:
+                r.fail("arm64 RxPipeline SuperBlock 64-bit fixup targets", "; ".join(insn_errors))
+            else:
+                r.ok(
+                    "arm64 RxPipeline SuperBlock 64-bit fixup targets",
+                    "3 ReallocAndFixupSuperBlock instruction offsets verified in libGTASA.so",
+                )
 
 
 def _check_got_relocations(r: Runner, readelf_bin: Optional[Path], require_gtasa: bool) -> None:
