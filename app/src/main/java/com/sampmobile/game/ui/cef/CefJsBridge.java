@@ -37,4 +37,22 @@ final class CefJsBridge {
     public void setFocus(boolean hasFocus) {
         CefManager.focusBrowser(browserId, hasFocus);
     }
+
+    /**
+     * 页面声明自己的可交互区域（屏幕物理像素，CSV：left,top,right,bottom;...）。
+     *
+     * 声明后，只有从这些矩形内开始的触摸属于 WebView；矩形外的手指直接交给
+     * 游戏原生触摸管线，因此聚焦的 CEF 页面不会压死虚拟摇杆/视角拖动/原生 HUD。
+     * 不调用时保持旧行为：浏览器有焦点即整屏接管。
+     */
+    @JavascriptInterface
+    public void setTouchRegions(String csv) {
+        CefManager.setBrowserTouchRegions(browserId, csv);
+    }
+
+    /** 单矩形兼容入口。 */
+    @JavascriptInterface
+    public void setTouchRegion(int left, int top, int right, int bottom) {
+        CefManager.setBrowserTouchRegion(browserId, left, top, right, bottom);
+    }
 }
