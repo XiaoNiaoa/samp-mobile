@@ -172,12 +172,6 @@
     <string name="gamedata_manifest_url" translatable="false"></string>
 
     <!-- Extracted layout strings -->
-    <string name="ui_activity_game_editobject_001">旋转 X</string>
-    <string name="ui_activity_game_editobject_002">旋转 Y</string>
-    <string name="ui_activity_game_editobject_003">旋转 Z</string>
-    <string name="ui_activity_game_editobject_004">缩放</string>
-    <string name="ui_activity_game_editobject_005">选择一个选项</string>
-    <string name="ui_activity_game_editobject_006">保存</string>
     <string name="ui_item_gamedata_file_001">GTA:SA 核心 · 主世界模型档案</string>
     <string name="ui_item_gamedata_file_002">正常</string>
     <string name="ui_item_mod_entry_001">提高优先级</string>

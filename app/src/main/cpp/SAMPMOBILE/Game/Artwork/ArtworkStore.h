@@ -36,8 +36,15 @@ public:
 		std::function<bool(FileType, uint32_t)> invalidateCorrupt;
 	};
 
-	static constexpr size_t kMaxSessionTxdBytes = 288u * 1024u * 1024u; // 288 MiB hard VRAM budget
+#if defined(__aarch64__) || defined(__x86_64__)
+	// DXT1/DXT5 PC textures expand 4x-8x when decoded to RGBA8888 on mobile; 64-bit devices
+	// need headroom for large multi-chunk 0.3.DL open-world maps (e.g. ~4k custom models).
+	static constexpr size_t kMaxSessionTxdBytes = 512u * 1024u * 1024u; // 512 MiB hard VRAM budget
+	static constexpr size_t kSoftEvictTxdBytes  = 384u * 1024u * 1024u; // 384 MiB proactive VW-switch trim
+#else
+	static constexpr size_t kMaxSessionTxdBytes = 288u * 1024u * 1024u; // 288 MiB hard VRAM budget (32-bit VA safe)
 	static constexpr size_t kSoftEvictTxdBytes  = 200u * 1024u * 1024u; // 200 MiB proactive VW-switch trim
+#endif
 
 	int32_t ensureCustomSkinLoaded(ArtworkManifest& manifest, const CacheAccess& cache, int32_t serverSkinId);
 	int32_t ensureCustomObjectLoaded(ArtworkManifest& manifest, const CacheAccess& cache, int32_t serverModelId);
@@ -81,10 +88,13 @@ private:
 
 	std::unordered_map<uint32_t, LoadedTxd> m_loadedTxds;
 	std::unordered_set<uint32_t> m_failedTxds;
-	std::unordered_map<int32_t, LoadedSlot> m_loadedSlots; // key = internalSlot
-	std::unordered_set<int32_t> m_failedModels;            // key = serverModelId
+	std::unordered_map<uint32_t, size_t> m_projectedTxdBytes; // cached decoded RGBA footprint per TXD CRC
+	std::unordered_set<uint32_t> m_budgetWarnedTxds;          // log VRAM refusal once per TXD CRC
+	std::unordered_map<int32_t, LoadedSlot> m_loadedSlots;    // key = internalSlot
+	std::unordered_set<int32_t> m_failedModels;               // key = serverModelId
 	size_t m_totalTxdBytes = 0;
 	uint64_t m_useSeq = 0;
+	uint32_t m_lastBudgetEvictCheckMs = 0;
 };
 
 // Priority lookup called from RwTextureRead hook while loading a custom 0.3.DL DFF.

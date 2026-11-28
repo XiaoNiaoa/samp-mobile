@@ -84,14 +84,19 @@ DECL_HOOK(int32_t, CObject_Render, sa::CObject *_this)
 		g_lastObjectModel.store(_this->m_nModelIndex, std::memory_order_relaxed);
 	}
 
-	// object material (covers both CObjectPool objects and CPlayerPed attached objects in O(1))
+	// object material (covers both CObjectPool objects and CPlayerPed attached objects in O(1);
+	// skip unordered_map lookup completely when zero objects in session use custom materials!)
 	CObject *pObject = nullptr;
-	if (_this && !IsEntityPlaceable(_this))
+	if (_this && CObject::HasAnyCustomMaterialObjects() && !IsEntityPlaceable(_this))
 	{
 		pObject = CObject::FindByGtaEntity(_this);
-		if (pObject)
+		if (pObject && pObject->m_bHasCustomObjectMaterial)
 		{
 			pObject->TryChangeToCustomObjectMaterial();
+		}
+		else
+		{
+			pObject = nullptr;
 		}
 	}
 
@@ -144,6 +149,11 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	{
 		return;
 	}
+	const int largestId = pObjectPool->GetLargestObjectId();
+	if (largestId < 0)
+	{
+		return;
+	}
 
 	RwMatrix matCam{};
 	bool hasCam = false;
@@ -166,9 +176,29 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	}
 	sa::CCamera* pEngineCam = &sa::getTheCamera();
 
+	// PC SA-MP CObject::Draw (g_objectRenderDistanceThreshold = 600.0f): only run expensive
+	// CObject::PreRender (dynamic lighting/shadows/2dEffects) within 600m; distant horizon/LOD
+	// chunks render directly via RenderOneNonRoad.
+	constexpr float kFullPreRenderDistSq = 600.0f * 600.0f;
+
+	auto renderManualObject = [](CObject *obj, float distSq) {
+		if (obj->NeedsPerFrameMatrixSync())
+		{
+			obj->UpdateRwMatrixAndFrame();
+		}
+		if (distSq < kFullPreRenderDistSq)
+		{
+			obj->Render();
+		}
+		else if (obj->m_entity && obj->m_entity->m_pRwObject)
+		{
+			eng::fn::CRenderer_RenderOneNonRoad(obj->m_entity);
+		}
+	};
+
 	s_transparentObjectCount = 0;
 
-	for (OBJECTID i = 0; i < MAX_OBJECTS; i++)
+	for (int i = 0; i <= largestId && i < MAX_OBJECTS; i++)
 	{
 		CObject *pObject = pObjectPool->GetAt(i);
 		if (!pObject || pObject->IsTimedHidden())
@@ -260,8 +290,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 			continue;
 		}
 
-		pObject->UpdateRwMatrixAndFrame();
-		pObject->Render();
+		renderManualObject(pObject, distSq);
 	}
 
 	if (s_transparentObjectCount > 1)
@@ -273,8 +302,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	}
 	for (int t = 0; t < s_transparentObjectCount; ++t)
 	{
-		s_transparentObjects[t].obj->UpdateRwMatrixAndFrame();
-		s_transparentObjects[t].obj->Render();
+		renderManualObject(s_transparentObjects[t].obj, s_transparentObjects[t].distSq);
 	}
 }
 

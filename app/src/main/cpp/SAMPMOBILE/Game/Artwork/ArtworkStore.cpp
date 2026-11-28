@@ -3,6 +3,7 @@
 #include "TxdParser.h"
 
 #include "../Patches.h"
+#include "../Util.h"
 #include "../Engine/Symbols.h"
 
 #include <SA.h>
@@ -602,6 +603,25 @@ RwTexDictionary* ArtworkStore::ensureTxdLoaded(ArtworkManifest& manifest, const 
 		return nullptr;
 	}
 
+	// Fast O(1) budget check BEFORE touching disk if we already measured this TXD's decoded footprint!
+	// Prevents catastrophic multi-megabyte disk-read + full-file validation thrashing on every streamed
+	// object when active world models temporarily hold the session TXD budget near capacity.
+	if (auto projIt = m_projectedTxdBytes.find(txdCrc); projIt != m_projectedTxdBytes.end()) {
+		const size_t cachedNeed = std::min(projIt->second, kMaxDecodedTxdBytes);
+		if (m_totalTxdBytes + cachedNeed > kMaxSessionTxdBytes) {
+			const uint32_t nowMs = GetTickCount();
+			if (m_lastBudgetEvictCheckMs == 0 || (nowMs - m_lastBudgetEvictCheckMs) >= 500u) {
+				m_lastBudgetEvictCheckMs = nowMs ? nowMs : 1u;
+				const size_t target = (kMaxSessionTxdBytes > cachedNeed)
+					? (kMaxSessionTxdBytes - cachedNeed) : 0u;
+				evictIdleToBudget(manifest, target);
+			}
+			if (m_totalTxdBytes + cachedNeed > kMaxSessionTxdBytes) {
+				return nullptr;
+			}
+		}
+	}
+
 	std::vector<uint8_t> bytes;
 	if (!readFileBytes(txdPath, bytes, kMaxArtworkFileBytes)) {
 		spdlog::warn("ArtworkStore: failed to read TXD {:08X} ({})", txdCrc, txdPath);
@@ -631,17 +651,21 @@ RwTexDictionary* ArtworkStore::ensureTxdLoaded(ArtworkManifest& manifest, const 
 		return nullptr;
 	}
 
+	m_projectedTxdBytes[txdCrc] = projectedBytes;
 	const size_t neededBytes = std::min(projectedBytes, kMaxDecodedTxdBytes);
 	if (m_totalTxdBytes + neededBytes > kMaxSessionTxdBytes) {
+		m_lastBudgetEvictCheckMs = GetTickCount() ? GetTickCount() : 1u;
 		const size_t target = (kMaxSessionTxdBytes > neededBytes)
 			? (kMaxSessionTxdBytes - neededBytes) : 0u;
 		evictIdleToBudget(manifest, target);
 	}
 	if (m_totalTxdBytes + neededBytes > kMaxSessionTxdBytes) {
-		spdlog::warn("ArtworkStore: session TXD VRAM budget ({} MiB) full with active models (used={} MiB, need={} KB); refusing TXD {:08X}",
-			kMaxSessionTxdBytes / (1024u * 1024u),
-			m_totalTxdBytes / (1024u * 1024u),
-			neededBytes / 1024u, txdCrc);
+		if (m_budgetWarnedTxds.insert(txdCrc).second) {
+			spdlog::warn("ArtworkStore: session TXD VRAM budget ({} MiB) full with active models (used={} MiB, need={} KB); deferring TXD {:08X}",
+				kMaxSessionTxdBytes / (1024u * 1024u),
+				m_totalTxdBytes / (1024u * 1024u),
+				neededBytes / 1024u, txdCrc);
+		}
 		return nullptr; // do not permanently poison m_failedTxds: may succeed once models become idle
 	}
 
@@ -894,21 +918,21 @@ int32_t ArtworkStore::ensureCustomObjectLoaded(ArtworkManifest& manifest, const 
 		return -1; // still downloading
 	}
 	RwTexDictionary* txd = nullptr;
-	if (rec->txdCrc != 0) {
-		std::string txdPath;
-		if (!cache.resolvePath(FileType::Txd, rec->txdCrc, txdPath)) {
-			return -1; // TXD still downloading
-		}
-		txd = ensureTxdLoaded(manifest, cache, rec->txdCrc);
-		if (!txd) {
-			spdlog::warn("ArtworkStore: custom object {} TXD {:08X} unavailable; falling back to baseId {}",
-				serverModelId, rec->txdCrc, rec->baseId);
-			if (m_failedTxds.count(rec->txdCrc)) {
-				m_failedModels.insert(serverModelId);
+		if (rec->txdCrc != 0) {
+			std::string txdPath;
+			if (!cache.resolvePath(FileType::Txd, rec->txdCrc, txdPath)) {
+				return -1; // TXD still downloading
 			}
-			return -1;
+			txd = ensureTxdLoaded(manifest, cache, rec->txdCrc);
+			if (!txd) {
+				if (m_failedTxds.count(rec->txdCrc)) {
+					spdlog::warn("ArtworkStore: custom object {} TXD {:08X} permanently failed; falling back to baseId {}",
+						serverModelId, rec->txdCrc, rec->baseId);
+					m_failedModels.insert(serverModelId);
+				}
+				return -1;
+			}
 		}
-	}
 
 	sa::CBaseModelInfo** modelInfoPtrs = Patches::modelInfoPtrs();
 	if (!modelInfoPtrs) {
@@ -1109,6 +1133,9 @@ void ArtworkStore::unloadAll(ArtworkManifest& manifest)
 		it = m_loadedTxds.erase(it);
 	}
 	m_failedTxds.clear();
+	m_projectedTxdBytes.clear();
+	m_budgetWarnedTxds.clear();
+	m_lastBudgetEvictCheckMs = 0;
 	m_totalTxdBytes = 0;
 	for (const auto& kv : m_loadedTxds) {
 		m_totalTxdBytes += kv.second.decodedBytes;

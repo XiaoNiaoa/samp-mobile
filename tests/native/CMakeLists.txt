@@ -33,6 +33,7 @@ endfunction()
 
 # ---- Core pure logic tests (no engine dependency) ----
 add_native_test(input_arbiter      core/test_input_arbiter.cpp)
+add_native_test(object_editor_core core/test_object_editor_core.cpp)
 add_native_test(settings_contract  core/test_settings_contract.cpp)
 add_native_test(textdraw_layout    core/test_textdraw_layout.cpp)
 add_native_test(touch_hud_core     core/test_touch_hud_core.cpp)
