@@ -391,8 +391,8 @@
     <string name="ui_settings_panel_multiplayer_017">跳过启动器原始文件完整性检查，避免手工替换的数据文件被还原</string>
     <string name="ui_settings_panel_multiplayer_018">0.3.DL 自定义模型缓存</string>
     <string name="ui_settings_panel_multiplayer_019">正在统计 SAMP/cache/ 目录…</string>
-    <string name="ui_settings_panel_multiplayer_020">支持导入 PC 端 0.3.DL 缓存 .zip 包或散装 0x*.dff / 0x*.txd（散装文件导入至 local/ 全服通用）</string>
-    <string name="ui_settings_panel_multiplayer_021">导入缓存</string>
+    <string name="ui_settings_panel_multiplayer_020">支持导入 PC 端 0.3.DL 缓存 .zip 包、已解压文件夹或散装 0x*.dff / 0x*.txd（自动识别多层目录并归入 local/ 全服通用）</string>
+    <string name="ui_settings_panel_multiplayer_021">导入文件/.zip</string>
     <string name="ui_settings_panel_multiplayer_022">清空全部</string>
     <string name="ui_settings_panel_multiplayer_023">暂无已缓存的服务器自定义模型</string>
     <string name="ui_settings_panel_multiplayer_024">启动器外观与主题</string>
@@ -413,6 +413,7 @@
     <string name="ui_settings_panel_multiplayer_039">启动器背景已更新</string>
     <string name="ui_settings_panel_multiplayer_040">已恢复默认启动器背景</string>
     <string name="ui_settings_panel_multiplayer_041">图片读取失败，请选择有效的 JPG / PNG / WEBP 图片</string>
+    <string name="ui_settings_panel_multiplayer_042">导入文件夹</string>
     <string name="ui_settings_panel_screenshots_001">游戏截图捕捉范围</string>
     <string name="ui_settings_panel_screenshots_002">点击底部 F8 按键或输入 /ss 时默认截取的画面内容</string>
     <string name="ui_settings_panel_screenshots_003">含界面与聊天</string>

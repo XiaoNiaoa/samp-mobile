@@ -10,6 +10,8 @@
 #include "Game/Artwork/TxdParser.h"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -275,7 +277,12 @@ static void testCrc32AndHelpers()
 	CHECK_EQ(parsedCrc, 0xABCDEFu);
 	CHECK(parsedType == FileType::Txd);
 	CHECK(!parseCacheFileHash("not_a_hash.dff", parsedCrc, parsedType));
+	CHECK(!parseCacheFileHash("infernus.dff", parsedCrc, parsedType));
+	CHECK(!parseCacheFileHash("0x0.dff", parsedCrc, parsedType));
 	CHECK(!parseCacheFileHash("0x1234.png", parsedCrc, parsedType));
+	CHECK(parseCacheFileHash("0X0099bae0 (1).DFF", parsedCrc, parsedType));
+	CHECK_EQ(parsedCrc, 0x99BAE0u);
+	CHECK(parsedType == FileType::Dff);
 
 	CHECK(isSafeHttpUrl("http://192.168.1.10:7777/skin.dff"));
 	CHECK(isSafeHttpUrl("https://cdn.example.com/models/box.txd"));
@@ -1186,6 +1193,67 @@ static void testRetryBackoffAndAdaptiveConcurrency()
 	CHECK_EQ(m.effectiveConcurrencyLimit(), kMaxConcurrentDownloads);
 }
 
+static void testLooseDiskCacheIndexPrecedenceAndCaseSensitivity()
+{
+	namespace fs = std::filesystem;
+	const fs::path base = fs::temp_directory_path() / "samp_artwork_cache_idx_test";
+	std::error_code ec;
+	fs::remove_all(base, ec);
+
+	const fs::path localDir = base / "local";
+	const fs::path srvDir = base / "cn-1.server.com.7777";
+	// Simulate PC hyphen-stripped / uppercase domain & nested SAMP/cache/cache/ folders
+	const fs::path pcFallbackDir = base / "cache" / "Play.Server.COM.7777";
+	fs::create_directories(localDir);
+	fs::create_directories(srvDir);
+	fs::create_directories(pcFallbackDir);
+
+	auto writeDummy = [](const fs::path& p, size_t len) {
+		std::ofstream ofs(p, std::ios::binary);
+		std::vector<char> buf(len, 'A');
+		ofs.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+	};
+
+	// 1. Lowercase hex + leading zero + uppercase .DFF inside nested PC folder -> must preserve exact path on Linux!
+	const fs::path fallbackOnly = pcFallbackDir / "0x0012abcd.DFF";
+	writeDummy(fallbackOnly, 120u);
+
+	// 2. Duplicate suffix file in fallback vs canonical override in local/ -> local/ must win!
+	writeDummy(pcFallbackDir / "0x99bae090 (1).txd", 200u);
+	const fs::path localOverride = localDir / "0x99BAE090.txd";
+	writeDummy(localOverride, 240u);
+
+	// 3. Server-specific cache overrides both fallback and local/!
+	writeDummy(localDir / "0xDEADBEEF.dff", 300u);
+	const fs::path srvOverride = srvDir / "0xDEADBEEF.dff";
+	writeDummy(srvOverride, 360u);
+
+	// 4. Non-0x files (Modloader / temp) must be ignored
+	writeDummy(localDir / "infernus.dff", 500u);
+	writeDummy(srvDir / "0xCAFEBABE.dff.tmp", 500u);
+
+	DiskCacheMap idx;
+	buildDiskCacheIndex(base.generic_string(), localDir.generic_string(), srvDir.generic_string(), idx);
+	CHECK_EQ(idx.size(), 3u);
+
+	auto it1 = idx.find(ResourceKey{FileType::Dff, 0x12ABCDu});
+	CHECK(it1 != idx.end());
+	CHECK_EQ(it1->second.size, 120u);
+	CHECK(it1->second.path == fallbackOnly.generic_string());
+
+	auto it2 = idx.find(ResourceKey{FileType::Txd, 0x99BAE090u});
+	CHECK(it2 != idx.end());
+	CHECK_EQ(it2->second.size, 240u);
+	CHECK(it2->second.path == localOverride.generic_string());
+
+	auto it3 = idx.find(ResourceKey{FileType::Dff, 0xDEADBEEFu});
+	CHECK(it3 != idx.end());
+	CHECK_EQ(it3->second.size, 360u);
+	CHECK(it3->second.path == srvOverride.generic_string());
+
+	fs::remove_all(base, ec);
+}
+
 int main()
 {
 	testCrc32AndHelpers();
@@ -1198,5 +1266,6 @@ int main()
 	testStrictFsmCorruptRecoveryUrlRedactionAndHistoryCap();
 	testTxdMip0TruncatedAndStreaming();
 	testLzma1DirectChunkDecoder();
+	testLooseDiskCacheIndexPrecedenceAndCaseSensitivity();
 	return check::finish();
 }

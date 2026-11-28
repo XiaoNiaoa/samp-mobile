@@ -157,6 +157,13 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
                 }
             });
 
+    final ActivityResultLauncher<Uri> artworkCacheFolderPicker =
+            registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), treeUri -> {
+                if (treeUri != null && isAdded()) {
+                    artworkCacheController.onFolderPicked(treeUri);
+                }
+            });
+
     final ActivityResultLauncher<String[]> backdropImagePicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
                 if (uri != null && isAdded()) {

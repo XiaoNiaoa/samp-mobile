@@ -109,7 +109,6 @@ private:
 
 	void ensureCacheDirectories();
 	void rebuildDiskCacheIndex();
-	void indexCacheDirectory(const std::string& dir);
 	bool isDiskCached(FileType type, uint32_t crc, uint32_t expectedSize) const noexcept;
 	void recordDiskCached(FileType type, uint32_t crc, uint32_t fallbackSize);
 	void purgeUnusedServerCache();
@@ -144,6 +143,7 @@ private:
 
 	std::string m_serverHost;
 	uint16_t m_serverPort = 0;
+	std::string m_cacheBaseDir;
 	std::string m_serverCacheDir;
 	std::string m_localCacheDir;
 
@@ -167,7 +167,7 @@ private:
 	uint32_t m_lastSnapshotPublishMs = 0;
 	bool m_lastPublishedGateActive = false;
 
-	std::unordered_map<ResourceKey, uint64_t, ResourceKeyHash> m_diskCacheIndex;
+	DiskCacheMap m_diskCacheIndex;
 
 	mutable std::mutex m_eventMutex;
 	std::deque<PendingWorkerEvent> m_pendingEvents;

@@ -855,6 +855,13 @@ final class I18nZhEn {
         EN.put("完整版", "full-edition");
         EN.put("精简版", "lite-edition");
         EN.put("）。\n\n本安装包已内置游戏资源，点击下方「解压内置资源」即可自动安装，无需联网下载。", ").\n\nThis package embeds the game data. Tap \"Extract built-in data\" below to install it automatically - no download needed.");
+        EN.put("导入文件夹", "Import Folder");
+        EN.put("导入文件/.zip", "Import .zip/File");
+        EN.put("无法打开系统文件夹选择器: ", "Unable to open system folder picker: ");
+        EN.put("暂不支持直接读取 %s 压缩包", "Direct %s archive import not supported");
+        EN.put("检测到您选择了 %s 格式压缩包，系统原生仅支持直接读取 .zip 格式。\n\n请先用手机文件管理器（如 MT管理器 / ZArchiver）将其解压到任意文件夹，再点击下方「导入文件夹」自动扫描导入，或重新打包为 .zip 后导入。", "Selected archive is in %s format; Android natively reads .zip archives only.\n\nPlease extract it to any folder with a file manager (e.g. ZArchiver / MT Manager) and tap \"Import Folder\" below, or repackage it as .zip.");
+        EN.put("所选文件/文件夹中未检测到 0x<CRC>.dff 或 0x<CRC>.txd 格式的服务器模型缓存文件。\n\n若压缩包为 .7z / .rar 格式，请先解压后点击「导入文件夹」；普通单机/Modloader 模型请前往「模组」板块导入。", "No 0x<CRC>.dff or 0x<CRC>.txd server model cache files were found in the selected files/folder.\n\nIf your pack is a .7z / .rar archive, extract it first and tap \"Import Folder\". For regular single-player / Modloader mods, use the \"Mods\" tab instead.");
+        EN.put("导入完成：%,d 个文件（%s）已归入 local 全服缓存，跳过 %,d 项", "Imported %,d files (%s) into shared local cache (skipped %,d items)");
     }
 
     private I18nZhEn() {}

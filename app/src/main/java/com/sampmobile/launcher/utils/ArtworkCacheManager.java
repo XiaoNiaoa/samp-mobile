@@ -4,13 +4,18 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 
 import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -21,15 +26,24 @@ import java.util.zip.ZipInputStream;
 
 /**
  * Manages the SA-MP 0.3.DL / open.mp custom model disk cache under {@code files/SAMP/cache/}.
- * Supports scanning per-server & shared {@code local/} cache directories, safely importing
- * PC 0.3.DL cache {@code .zip} archives or individual {@code 0x*.dff} / {@code 0x*.txd} files,
- * and deleting individual server folders or clearing the entire cache.
+ * Supports scanning per-server & shared {@code local/} cache directories, importing PC 0.3.DL
+ * cache {@code .zip} archives (with arbitrary nested folder hierarchies, nested {@code .zip}s,
+ * and Windows GBK/UTF-8 paths), recursive SAF directories, or individual {@code 0x*.dff} /
+ * {@code 0x*.txd} cache files, and deleting individual cache folders or clearing all caches.
  */
 public final class ArtworkCacheManager {
 
     private static final int IO_BUFFER_SIZE = 64 * 1024;
     private static final long MAX_SINGLE_FILE_BYTES = 64L * 1024L * 1024L;
     private static final int MAX_FOLDER_NAME_LEN = 96;
+    private static final int MAX_ZIP_NESTING = 3;
+    private static final int MAX_SCAN_DEPTH = 4;
+    private static final int MAX_TREE_DEPTH = 12;
+
+    private static final int STREAM_RAW = 0;
+    private static final int STREAM_ZIP = 1;
+    private static final int STREAM_7Z = 2;
+    private static final int STREAM_RAR = 3;
 
     private ArtworkCacheManager() {}
 
@@ -64,12 +78,19 @@ public final class ArtworkCacheManager {
         public final int skippedFiles;
         public final long importedBytes;
         public final boolean cancelled;
+        public final String unsupportedArchiveFormat;
 
         public ImportResult(int importedFiles, int skippedFiles, long importedBytes, boolean cancelled) {
+            this(importedFiles, skippedFiles, importedBytes, cancelled, null);
+        }
+
+        public ImportResult(int importedFiles, int skippedFiles, long importedBytes, boolean cancelled,
+                            String unsupportedArchiveFormat) {
             this.importedFiles = importedFiles;
             this.skippedFiles = skippedFiles;
             this.importedBytes = importedBytes;
             this.cancelled = cancelled;
+            this.unsupportedArchiveFormat = unsupportedArchiveFormat;
         }
     }
 
@@ -85,17 +106,16 @@ public final class ArtworkCacheManager {
     }
 
     /**
-     * Validates and canonicalizes a 0.3.DL cache filename ({@code 0x<hex>.dff} or {@code 0x<hex>.txd})
+     * Validates and canonicalizes a 0.3.DL cache filename ({@code 0x<hex>.dff} or {@code 0x<hex>.txd},
+     * optionally with browser/QQ duplicate suffixes such as {@code 0x99BAE090 (1).dff})
      * to match C++ {@code artwork::formatCacheFileName()} ({@code 0x%X.dff} / {@code 0x%X.txd}).
-     * Returns {@code null} for any non-cache filename.
+     * Strictly rejects arbitrary non-0x filenames (such as single-player / Modloader models).
      */
     public static String normalizeCacheFileName(String rawName) {
         if (rawName == null) return null;
         String trimmed = rawName.trim();
-        if (trimmed.length() < 7 || trimmed.length() > 16) return null;
-        if (trimmed.charAt(0) != '0' || (trimmed.charAt(1) != 'x' && trimmed.charAt(1) != 'X')) {
-            return null;
-        }
+        if (trimmed.length() < 7 || trimmed.length() > 32) return null;
+
         int dot = trimmed.lastIndexOf('.');
         if (dot <= 2 || dot >= trimmed.length() - 1) return null;
 
@@ -104,7 +124,12 @@ public final class ArtworkCacheManager {
             return null;
         }
 
-        String hex = trimmed.substring(2, dot);
+        String stem = stripDuplicateDownloadSuffix(trimmed.substring(0, dot).trim());
+        if (stem.length() < 3 || stem.charAt(0) != '0' || (stem.charAt(1) != 'x' && stem.charAt(1) != 'X')) {
+            return null;
+        }
+
+        String hex = stem.substring(2);
         if (hex.isEmpty() || hex.length() > 8) return null;
         long val = 0;
         for (int i = 0; i < hex.length(); i++) {
@@ -118,6 +143,26 @@ public final class ArtworkCacheManager {
         }
         if (val == 0L) return null;
         return String.format(Locale.US, "0x%X.%s", (int) val, ext);
+    }
+
+    private static String stripDuplicateDownloadSuffix(String stem) {
+        if (stem.length() > 5 && stem.charAt(stem.length() - 1) == ')') {
+            int open = stem.lastIndexOf('(');
+            if (open > 2 && open < stem.length() - 2) {
+                boolean allDigits = true;
+                for (int i = open + 1; i < stem.length() - 1; i++) {
+                    char c = stem.charAt(i);
+                    if (c < '0' || c > '9') {
+                        allDigits = false;
+                        break;
+                    }
+                }
+                if (allDigits) {
+                    return stem.substring(0, open).trim();
+                }
+            }
+        }
+        return stem;
     }
 
     public static boolean isSafeServerFolderName(String name) {
@@ -141,11 +186,21 @@ public final class ArtworkCacheManager {
     }
 
     /**
-     * Resolves a ZIP entry path to a safe relative destination under {@code SAMP/cache/}, e.g.
-     * {@code "local/0x1234ABCD.dff"} or {@code "116.62.52.151.7777/0x1234ABCD.txd"}.
-     * Returns {@code null} if the entry is not a valid 0.3.DL cache file or fails safety checks.
+     * Resolves any archive/relative entry path to a unified relative destination under
+     * {@code SAMP/cache/local/0x<CRC>.dff|txd} regardless of wrapper folder depth or PC server
+     * directory name (IP vs domain, port, hyphen stripping, Chinese wrapper directories, etc.).
+     * Returns {@code null} if the entry is not a valid {@code 0x<CRC>.dff|txd} file or fails
+     * Zip-Slip traversal checks.
      */
     public static String resolveZipEntryTarget(String rawEntryName) {
+        String fileName = extractSafeLeafName(rawEntryName);
+        if (fileName == null) return null;
+        String canonicalFile = normalizeCacheFileName(fileName);
+        if (canonicalFile == null) return null;
+        return "local/" + canonicalFile;
+    }
+
+    private static String extractSafeLeafName(String rawEntryName) {
         if (rawEntryName == null || rawEntryName.isEmpty()) return null;
         String unified = rawEntryName.replace('\\', '/');
         while (unified.startsWith("/")) {
@@ -154,34 +209,22 @@ public final class ArtworkCacheManager {
         if (unified.isEmpty() || unified.endsWith("/")) return null;
 
         String[] parts = unified.split("/");
-        List<String> clean = new ArrayList<>(parts.length);
+        String last = null;
         for (String p : parts) {
             if (p.isEmpty() || ".".equals(p)) continue;
             if ("..".equals(p)) return null; // Zip-Slip guard
-            clean.add(p);
+            last = p;
         }
-        if (clean.isEmpty()) return null;
-
-        String canonicalFile = normalizeCacheFileName(clean.get(clean.size() - 1));
-        if (canonicalFile == null) return null;
-
-        if (clean.size() >= 2) {
-            String parent = clean.get(clean.size() - 2);
-            if ("local".equalsIgnoreCase(parent)) {
-                return "local/" + canonicalFile;
-            }
-            if (isSafeServerFolderName(parent)) {
-                return parent + "/" + canonicalFile;
-            }
-        }
-        // Flat zip or generic wrapper directory -> put into shared local/ cache so every server hits it.
-        return "local/" + canonicalFile;
+        return last;
     }
 
     public static CacheSummary scan(File cacheRoot) {
         if (cacheRoot == null || !cacheRoot.isDirectory()) {
             return new CacheSummary(0, 0L, Collections.emptyList());
         }
+        // Migrate any loose 0x<CRC>.dff|txd dropped directly into SAMP/cache/ root into local/
+        migrateLooseRootCacheFiles(cacheRoot);
+
         File[] children = cacheRoot.listFiles();
         if (children == null || children.length == 0) {
             return new CacheSummary(0, 0L, Collections.emptyList());
@@ -196,17 +239,10 @@ public final class ArtworkCacheManager {
             String name = child.getName();
             if (".".equals(name) || "..".equals(name)) continue;
 
-            int count = 0;
-            long bytes = 0L;
-            File[] files = child.listFiles();
-            if (files != null) {
-                for (File f : files) {
-                    if (f.isFile()) {
-                        count++;
-                        bytes += Math.max(0L, f.length());
-                    }
-                }
-            }
+            long[] stats = new long[2]; // [0]=count, [1]=bytes
+            scanDirectoryStats(child, MAX_SCAN_DEPTH, stats);
+            int count = (int) stats[0];
+            long bytes = stats[1];
             if (count == 0) continue; // skip empty directories like freshly created local/
             boolean isLocal = "local".equalsIgnoreCase(name);
             folders.add(new FolderEntry(name, isLocal, count, bytes));
@@ -221,6 +257,47 @@ public final class ArtworkCacheManager {
         });
 
         return new CacheSummary(totalFiles, totalBytes, folders);
+    }
+
+    private static void migrateLooseRootCacheFiles(File cacheRoot) {
+        File[] children = cacheRoot.listFiles();
+        if (children == null) return;
+        File localDir = null;
+        for (File child : children) {
+            if (!child.isFile()) continue;
+            String canonical = normalizeCacheFileName(child.getName());
+            if (canonical == null) continue;
+            if (localDir == null) {
+                localDir = new File(cacheRoot, "local");
+                if (!localDir.exists() && !localDir.mkdirs()) {
+                    return;
+                }
+            }
+            File dst = new File(localDir, canonical);
+            if (dst.exists()) {
+                dst.delete();
+            }
+            // Best-effort atomic move on same filesystem
+            //noinspection ResultOfMethodCallIgnored
+            child.renameTo(dst);
+        }
+    }
+
+    private static void scanDirectoryStats(File dir, int depthLeft, long[] stats) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            String name = f.getName();
+            if (".".equals(name) || "..".equals(name)) continue;
+            if (f.isFile()) {
+                if (normalizeCacheFileName(name) != null) {
+                    stats[0]++;
+                    stats[1] += Math.max(0L, f.length());
+                }
+            } else if (depthLeft > 0 && f.isDirectory()) {
+                scanDirectoryStats(f, depthLeft - 1, stats);
+            }
+        }
     }
 
     public static boolean deleteFolder(File cacheRoot, String folderName) {
@@ -267,113 +344,415 @@ public final class ArtworkCacheManager {
         return f.delete();
     }
 
+    /**
+     * Imports one or more local {@link File}s (archives, loose {@code 0x<CRC>.dff|txd} files,
+     * or nested directories) into {@code cacheRoot/local/}. Shared directly between runtime logic
+     * and host JVM unit tests.
+     */
+    public static ImportResult importFromFiles(List<File> sources, File cacheRoot,
+                                               ProgressListener listener, AtomicBoolean cancelled) throws IOException {
+        if (sources == null || sources.isEmpty() || cacheRoot == null) {
+            return new ImportResult(0, 0, 0L, false, null);
+        }
+        if (!cacheRoot.exists()) {
+            cacheRoot.mkdirs();
+        }
+        String cacheRootCanon = cacheRoot.getCanonicalPath();
+        ImportSession session = new ImportSession(cacheRoot, cacheRootCanon, listener, cancelled);
+
+        for (File src : sources) {
+            if (session.isCancelled()) {
+                break;
+            }
+            if (src == null || !src.exists()) {
+                session.skipped++;
+                continue;
+            }
+            if (src.isDirectory()) {
+                importLocalDirectory(src, MAX_TREE_DEPTH, session);
+            } else if (src.isFile()) {
+                try (InputStream raw = new FileInputStream(src)) {
+                    importSingleStream(raw, src.getName(), session);
+                }
+            }
+        }
+        return session.toResult();
+    }
+
+    private static void importLocalDirectory(File dir, int depthLeft, ImportSession session) throws IOException {
+        File[] kids = dir.listFiles();
+        if (kids == null) return;
+        for (File child : kids) {
+            if (session.isCancelled()) return;
+            String name = child.getName();
+            if (".".equals(name) || "..".equals(name) || "__MACOSX".equals(name)) continue;
+            if (child.isDirectory()) {
+                if (depthLeft > 0) {
+                    importLocalDirectory(child, depthLeft - 1, session);
+                }
+            } else if (child.isFile()) {
+                String canonical = normalizeCacheFileName(name);
+                if (canonical != null) {
+                    try (InputStream in = new FileInputStream(child)) {
+                        writeCanonicalLocalFile(in, canonical, session);
+                    }
+                } else if (hasZipExtension(name)) {
+                    try (InputStream in = new FileInputStream(child)) {
+                        importSingleStream(in, name, session);
+                    }
+                } else {
+                    String unsup = detectUnsupportedArchiveExtension(name);
+                    if (unsup != null && session.unsupportedFormat == null) {
+                        session.unsupportedFormat = unsup;
+                    }
+                    session.skipped++;
+                }
+            }
+        }
+    }
+
     public static ImportResult importFromUris(Context context, List<Uri> uris, File cacheRoot,
                                               ProgressListener listener, AtomicBoolean cancelled) throws IOException {
         if (context == null || uris == null || uris.isEmpty() || cacheRoot == null) {
-            return new ImportResult(0, 0, 0L, false);
+            return new ImportResult(0, 0, 0L, false, null);
         }
         if (!cacheRoot.exists()) {
             cacheRoot.mkdirs();
         }
         String cacheRootCanon = cacheRoot.getCanonicalPath();
         ContentResolver resolver = context.getContentResolver();
-
-        int[] counts = new int[2]; // [0]=imported, [1]=skipped
-        long[] bytes = new long[1];
-        byte[] buf = new byte[IO_BUFFER_SIZE];
+        ImportSession session = new ImportSession(cacheRoot, cacheRootCanon, listener, cancelled);
 
         for (Uri uri : uris) {
-            if (cancelled != null && cancelled.get()) {
-                return new ImportResult(counts[0], counts[1], bytes[0], true);
+            if (session.isCancelled()) {
+                break;
             }
             if (uri == null) continue;
             String displayName = queryDisplayName(resolver, uri);
-            String lower = displayName != null ? displayName.toLowerCase(Locale.US) : "";
-
-            if (lower.endsWith(".zip")) {
-                importZipUri(resolver, uri, cacheRoot, cacheRootCanon, buf, counts, bytes, listener, cancelled);
-            } else {
-                String canonical = normalizeCacheFileName(displayName);
-                if (canonical == null) {
-                    counts[1]++;
+            try (InputStream raw = resolver.openInputStream(uri)) {
+                if (raw == null) {
+                    session.skipped++;
                     continue;
                 }
-                File dstDir = new File(cacheRoot, "local");
-                if (!dstDir.exists()) dstDir.mkdirs();
-                File dst = new File(dstDir, canonical);
-                try (InputStream raw = resolver.openInputStream(uri)) {
-                    if (raw == null) {
-                        counts[1]++;
+                importSingleStream(raw, displayName, session);
+            }
+        }
+        return session.toResult();
+    }
+
+    /**
+     * Recursively imports a user-selected SAF directory ({@code OpenDocumentTree}) at arbitrary
+     * subfolder depth, normalizing all {@code 0x<CRC>.dff|txd} files (and any inner {@code .zip}
+     * archives) into {@code SAMP/cache/local/}.
+     */
+    public static ImportResult importFromTreeUri(Context context, Uri treeUri, File cacheRoot,
+                                                 ProgressListener listener, AtomicBoolean cancelled) throws IOException {
+        if (context == null || treeUri == null || cacheRoot == null) {
+            return new ImportResult(0, 0, 0L, false, null);
+        }
+        if (!cacheRoot.exists()) {
+            cacheRoot.mkdirs();
+        }
+        String cacheRootCanon = cacheRoot.getCanonicalPath();
+        ContentResolver resolver = context.getContentResolver();
+        ImportSession session = new ImportSession(cacheRoot, cacheRootCanon, listener, cancelled);
+
+        String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
+        if (rootDocId != null && !rootDocId.isEmpty()) {
+            traverseSafDirectory(resolver, treeUri, rootDocId, MAX_TREE_DEPTH, session);
+        }
+        return session.toResult();
+    }
+
+    private static void traverseSafDirectory(ContentResolver resolver, Uri treeUri, String dirDocId,
+                                             int depthLeft, ImportSession session) throws IOException {
+        if (session.isCancelled()) return;
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId);
+        List<String> subDirs = new ArrayList<>();
+        List<String[]> candidateFiles = new ArrayList<>(); // [docId, displayName]
+
+        try (Cursor c = resolver.query(childrenUri, new String[]{
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+        }, null, null, null)) {
+            if (c != null) {
+                while (c.moveToNext()) {
+                    if (session.isCancelled()) return;
+                    String childId = c.getString(0);
+                    String name = c.getString(1);
+                    String mime = c.getString(2);
+                    if (childId == null || name == null || ".".equals(name) || "..".equals(name) || "__MACOSX".equals(name)) {
                         continue;
                     }
-                    long written = writeAtomically(raw, dst, buf, cancelled);
-                    if (written > 0) {
-                        counts[0]++;
-                        bytes[0] += written;
-                        if (listener != null) {
-                            listener.onProgress(counts[0], counts[1], "local/" + canonical);
+                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                        if (depthLeft > 0) {
+                            subDirs.add(childId);
                         }
                     } else {
-                        counts[1]++;
+                        candidateFiles.add(new String[]{childId, name});
                     }
                 }
             }
         }
 
-        boolean wasCancelled = cancelled != null && cancelled.get();
-        return new ImportResult(counts[0], counts[1], bytes[0], wasCancelled);
+        for (String[] item : candidateFiles) {
+            if (session.isCancelled()) return;
+            String docId = item[0];
+            String name = item[1];
+            String canonical = normalizeCacheFileName(name);
+            if (canonical != null) {
+                Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                try (InputStream in = resolver.openInputStream(fileUri)) {
+                    if (in == null) {
+                        session.skipped++;
+                    } else {
+                        writeCanonicalLocalFile(in, canonical, session);
+                    }
+                }
+            } else if (hasZipExtension(name)) {
+                Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                try (InputStream in = resolver.openInputStream(fileUri)) {
+                    if (in == null) {
+                        session.skipped++;
+                    } else {
+                        importSingleStream(in, name, session);
+                    }
+                }
+            } else {
+                String unsup = detectUnsupportedArchiveExtension(name);
+                if (unsup != null && session.unsupportedFormat == null) {
+                    session.unsupportedFormat = unsup;
+                }
+                session.skipped++;
+            }
+        }
+
+        for (String subDirId : subDirs) {
+            if (session.isCancelled()) return;
+            traverseSafDirectory(resolver, treeUri, subDirId, depthLeft - 1, session);
+        }
     }
 
-    private static void importZipUri(ContentResolver resolver, Uri zipUri, File cacheRoot, String cacheRootCanon,
-                                     byte[] buf, int[] counts, long[] bytes,
-                                     ProgressListener listener, AtomicBoolean cancelled) throws IOException {
-        try (InputStream raw = resolver.openInputStream(zipUri)) {
-            if (raw == null) {
-                throw new IOException(I18n.tr("无法打开所选压缩包"));
+    private static void importSingleStream(InputStream raw, String displayName, ImportSession session) throws IOException {
+        BufferedInputStream bis = (raw instanceof BufferedInputStream)
+                ? (BufferedInputStream) raw
+                : new BufferedInputStream(raw, IO_BUFFER_SIZE);
+
+        int kind = sniffStreamKind(bis, displayName);
+        if (kind == STREAM_7Z) {
+            if (session.unsupportedFormat == null) session.unsupportedFormat = ".7z";
+            session.skipped++;
+            return;
+        }
+        if (kind == STREAM_RAR) {
+            if (session.unsupportedFormat == null) session.unsupportedFormat = ".rar";
+            session.skipped++;
+            return;
+        }
+        if (kind == STREAM_ZIP) {
+            importZipStream(bis, 1, session);
+            return;
+        }
+
+        String canonical = normalizeCacheFileName(displayName);
+        if (canonical == null) {
+            session.skipped++;
+            return;
+        }
+        writeCanonicalLocalFile(bis, canonical, session);
+    }
+
+    private static int sniffStreamKind(BufferedInputStream bis, String displayName) throws IOException {
+        bis.mark(16);
+        byte[] hdr = new byte[8];
+        int read = 0;
+        while (read < hdr.length) {
+            int n = bis.read(hdr, read, hdr.length - read);
+            if (n <= 0) break;
+            read += n;
+        }
+        bis.reset();
+
+        if (read >= 4 && hdr[0] == 0x50 && hdr[1] == 0x4B) {
+            byte b2 = hdr[2];
+            byte b3 = hdr[3];
+            if ((b2 == 0x03 && b3 == 0x04) || (b2 == 0x05 && b3 == 0x06) || (b2 == 0x07 && b3 == 0x08)) {
+                return STREAM_ZIP;
             }
-            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(raw, IO_BUFFER_SIZE))) {
-                ZipEntry entry;
-                long lastNotifyMs = 0L;
-                while ((entry = zis.getNextEntry()) != null) {
-                    if (cancelled != null && cancelled.get()) {
-                        return;
-                    }
-                    if (entry.isDirectory()) {
-                        zis.closeEntry();
-                        continue;
-                    }
-                    String relTarget = resolveZipEntryTarget(entry.getName());
-                    if (relTarget == null) {
-                        counts[1]++;
-                        zis.closeEntry();
-                        continue;
-                    }
-                    File dst = new File(cacheRoot, relTarget);
+        }
+        if (read >= 6
+                && (hdr[0] & 0xFF) == 0x37 && (hdr[1] & 0xFF) == 0x7A
+                && (hdr[2] & 0xFF) == 0xBC && (hdr[3] & 0xFF) == 0xAF
+                && (hdr[4] & 0xFF) == 0x27 && (hdr[5] & 0xFF) == 0x1C) {
+            return STREAM_7Z;
+        }
+        if (read >= 6
+                && hdr[0] == 'R' && hdr[1] == 'a' && hdr[2] == 'r' && hdr[3] == '!'
+                && (hdr[4] & 0xFF) == 0x1A && (hdr[5] & 0xFF) == 0x07) {
+            return STREAM_RAR;
+        }
+
+        String unsup = detectUnsupportedArchiveExtension(displayName);
+        if (".7z".equals(unsup)) return STREAM_7Z;
+        if (".rar".equals(unsup)) return STREAM_RAR;
+        if (read == 0 && hasZipExtension(displayName)) return STREAM_ZIP;
+        return STREAM_RAW;
+    }
+
+    private static ZipInputStream openTolerantZipStream(InputStream in) {
+        // Android API 24+ & JDK ZipInputStream automatically decode UTF-8 entries when GPBF bit 11
+        // is set, and use the supplied Charset (GBK) for legacy Windows non-UTF-8 entries so Chinese
+        // wrapper directories packed by WinRAR / Windows Explorer never throw MALFORMED.
+        try {
+            return new ZipInputStream(in, Charset.forName("GBK"));
+        } catch (Throwable ignored) {
+            return new ZipInputStream(in, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static void importZipStream(InputStream stream, int depth, ImportSession session) throws IOException {
+        try (ZipInputStream zis = openTolerantZipStream(stream)) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                if (session.isCancelled()) {
+                    return;
+                }
+                if (entry.isDirectory()) {
+                    zis.closeEntry();
+                    continue;
+                }
+                String entryName = entry.getName();
+                String relTarget = resolveZipEntryTarget(entryName);
+                if (relTarget != null) {
+                    File dst = new File(session.cacheRoot, relTarget);
                     File parent = dst.getParentFile();
                     if (parent != null && !parent.exists()) {
                         parent.mkdirs();
                     }
                     String dstCanon = dst.getCanonicalPath();
-                    if (!dstCanon.startsWith(cacheRootCanon + File.separator)) {
-                        counts[1]++;
+                    if (!dstCanon.startsWith(session.cacheRootCanon + File.separator)) {
+                        session.skipped++;
                         zis.closeEntry();
                         continue;
                     }
-                    long written = writeAtomically(zis, dst, buf, cancelled);
+                    long written = writeAtomically(zis, dst, session.buf, session.cancelled);
                     zis.closeEntry();
                     if (written > 0) {
-                        counts[0]++;
-                        bytes[0] += written;
-                        long now = System.currentTimeMillis();
-                        if (listener != null && (now - lastNotifyMs >= 80L || counts[0] <= 3)) {
-                            lastNotifyMs = now;
-                            listener.onProgress(counts[0], counts[1], relTarget);
-                        }
+                        session.onImported(written, relTarget);
                     } else {
-                        counts[1]++;
+                        session.skipped++;
+                    }
+                    continue;
+                }
+
+                // Support nested .zip inside .zip (e.g. "群文件离线包.zip" -> "cache.zip")
+                String leaf = extractSafeLeafName(entryName);
+                if (leaf != null && depth < MAX_ZIP_NESTING && hasZipExtension(leaf)) {
+                    importZipStream(new NonClosingInputStream(zis), depth + 1, session);
+                    zis.closeEntry();
+                    continue;
+                }
+                if (leaf != null) {
+                    String unsup = detectUnsupportedArchiveExtension(leaf);
+                    if (unsup != null && session.unsupportedFormat == null) {
+                        session.unsupportedFormat = unsup;
                     }
                 }
+                session.skipped++;
+                zis.closeEntry();
             }
+        }
+    }
+
+    private static void writeCanonicalLocalFile(InputStream in, String canonical, ImportSession session) throws IOException {
+        File dstDir = new File(session.cacheRoot, "local");
+        if (!dstDir.exists()) {
+            dstDir.mkdirs();
+        }
+        File dst = new File(dstDir, canonical);
+        String dstCanon = dst.getCanonicalPath();
+        if (!dstCanon.startsWith(session.cacheRootCanon + File.separator)) {
+            session.skipped++;
+            return;
+        }
+        long written = writeAtomically(in, dst, session.buf, session.cancelled);
+        if (written > 0) {
+            session.onImported(written, "local/" + canonical);
+        } else {
+            session.skipped++;
+        }
+    }
+
+    private static boolean hasZipExtension(String name) {
+        if (name == null) return false;
+        String lower = stripDuplicateDownloadSuffixForArchive(name.trim().toLowerCase(Locale.US));
+        return lower.endsWith(".zip");
+    }
+
+    private static String detectUnsupportedArchiveExtension(String name) {
+        if (name == null) return null;
+        String lower = stripDuplicateDownloadSuffixForArchive(name.trim().toLowerCase(Locale.US));
+        if (lower.endsWith(".7z") || lower.contains(".7z.")) return ".7z";
+        if (lower.endsWith(".rar") || lower.contains(".part1.rar")) return ".rar";
+        return null;
+    }
+
+    private static String stripDuplicateDownloadSuffixForArchive(String lowerName) {
+        int dot = lowerName.lastIndexOf('.');
+        if (dot > 0) {
+            String base = stripDuplicateDownloadSuffix(lowerName.substring(0, dot).trim());
+            return base + lowerName.substring(dot);
+        }
+        return lowerName;
+    }
+
+    private static final class NonClosingInputStream extends FilterInputStream {
+        NonClosingInputStream(InputStream in) {
+            super(in);
+        }
+
+        @Override
+        public void close() {
+            // Keep parent ZipInputStream open for subsequent entries
+        }
+    }
+
+    private static final class ImportSession {
+        final File cacheRoot;
+        final String cacheRootCanon;
+        final ProgressListener listener;
+        final AtomicBoolean cancelled;
+        final byte[] buf = new byte[IO_BUFFER_SIZE];
+        int imported = 0;
+        int skipped = 0;
+        long bytes = 0L;
+        long lastNotifyMs = 0L;
+        String unsupportedFormat = null;
+
+        ImportSession(File cacheRoot, String cacheRootCanon, ProgressListener listener, AtomicBoolean cancelled) {
+            this.cacheRoot = cacheRoot;
+            this.cacheRootCanon = cacheRootCanon;
+            this.listener = listener;
+            this.cancelled = cancelled;
+        }
+
+        boolean isCancelled() {
+            return cancelled != null && cancelled.get();
+        }
+
+        void onImported(long written, String relPath) {
+            imported++;
+            bytes += written;
+            long now = System.currentTimeMillis();
+            if (listener != null && (now - lastNotifyMs >= 80L || imported <= 3)) {
+                lastNotifyMs = now;
+                listener.onProgress(imported, skipped, relPath);
+            }
+        }
+
+        ImportResult toResult() {
+            return new ImportResult(imported, skipped, bytes, isCancelled(), unsupportedFormat);
         }
     }
 
