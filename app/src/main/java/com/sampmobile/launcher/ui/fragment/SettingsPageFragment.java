@@ -83,6 +83,7 @@ import com.sampmobile.launcher.utils.GameDataVerifier;
 import com.sampmobile.launcher.utils.LauncherBackdropManager;
 import com.sampmobile.launcher.utils.LauncherThemeManager;
 import com.sampmobile.launcher.utils.LocaleManager;
+import com.sampmobile.launcher.utils.ServerJoinProfileStore;
 
 @Obfuscate
 public class SettingsPageFragment extends Fragment implements LauncherThemeManager.ThemeListener {
@@ -581,7 +582,8 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
     }
 
     private void setupListeners(View view) {
-        et_settings_nickname.setText(settings.getString("nick_name"));
+        et_settings_nickname.setText(ServerJoinProfileStore.get(requireContext())
+                .getDefaultNickname(settings.getString("nick_name")));
         et_settings_nickname.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -594,9 +596,27 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
                 if (updatingWidgets) return;
                 String nick = s.toString().trim();
                 if (!nick.isEmpty()) {
+                    ServerJoinProfileStore.updateDefaultNickname(requireContext(), nick, false);
                     savePreference("nick_name", nick);
                 }
             }
+        });
+        et_settings_nickname.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus && isAdded() && !updatingWidgets) {
+                String nick = et_settings_nickname.getText().toString().trim();
+                if (!nick.isEmpty()) {
+                    ServerJoinProfileStore.updateDefaultNickname(requireContext(), nick, true);
+                }
+            }
+        });
+        et_settings_nickname.setOnEditorActionListener((tv, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE && isAdded()) {
+                String nick = tv.getText().toString().trim();
+                if (!nick.isEmpty()) {
+                    ServerJoinProfileStore.updateDefaultNickname(requireContext(), nick, true);
+                }
+            }
+            return false;
         });
 
         // 启动器自定义背景壁纸与压暗遮罩
@@ -1108,7 +1128,8 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
     private void setWidgetsForSettings() {
         updatingWidgets = true;
         try {
-            et_settings_nickname.setText(settings.getString("nick_name"));
+            et_settings_nickname.setText(ServerJoinProfileStore.get(requireContext())
+                    .getDefaultNickname(settings.getString("nick_name")));
 
             for (Map.Entry<CompoundButton, String> entry : buildSwitchMap().entrySet()) {
                 if (entry.getKey() != null) {

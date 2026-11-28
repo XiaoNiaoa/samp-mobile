@@ -97,6 +97,10 @@
     <string name="join_server">进入服务器</string>
     <string name="delete_server">删除服务器</string>
     <string name="player_nickname">玩家昵称</string>
+    <string name="nickname_history_btn">历史 ▾</string>
+    <string name="nickname_history_empty">暂无历史昵称记录</string>
+    <string name="password_show">显示</string>
+    <string name="password_hide">隐藏</string>
     <string name="column_name">名称</string>
     <string name="column_ping">延迟</string>
     <string name="column_mode">模式</string>
@@ -378,7 +382,7 @@
     <string name="ui_settings_panel_multiplayer_001">角色身份与协议兼容</string>
     <string name="ui_settings_panel_multiplayer_002">配置进入服务器时使用的角色名称、通信协议与文字编码</string>
     <string name="ui_settings_panel_multiplayer_003">默认游戏昵称</string>
-    <string name="ui_settings_panel_multiplayer_004">连接服务器时使用的角色名，支持英文、数字与下划线</string>
+    <string name="ui_settings_panel_multiplayer_004">进入新服务器时的默认角色名（各服务器会自动独立记住上次使用的名字）</string>
     <string name="ui_settings_panel_multiplayer_005">输入游戏昵称</string>
     <string name="ui_settings_panel_multiplayer_006">客户端协议版本</string>
     <string name="ui_settings_panel_multiplayer_007">模拟对应的客户端版本号以适配不同服务器限制</string>
