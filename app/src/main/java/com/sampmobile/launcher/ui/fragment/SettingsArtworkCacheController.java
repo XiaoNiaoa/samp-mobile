@@ -77,7 +77,6 @@ final class SettingsArtworkCacheController {
         if (btnClearAll != null) {
             btnClearAll.setOnClickListener(v -> onClickClearAll());
         }
-        refresh();
     }
 
     private void launchFilePicker() {

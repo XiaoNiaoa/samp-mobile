@@ -226,6 +226,11 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
 
     ClientSettings settings;
     private boolean updatingWidgets = false;
+    private long boundSettingsGen = -1L;
+    private boolean pageEverShown = false;
+    private final boolean[] categoryLoaded = new boolean[PANEL_LAYOUTS.length];
+    private int pendingHue = -1;
+    private boolean hueFrameScheduled = false;
     private RelativeLayout game_version_layout;
 
     private static final int[] PANEL_LAYOUTS = {
@@ -294,26 +299,41 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
         setupCategoryNavigation(view);
         setupListeners(view);
         setWidgetsForSettings();
-        populateHelpAndAbout();
+        boundSettingsGen = ClientSettings.currentGeneration();
 
         LauncherThemeManager.addListener(this);
         onThemeColorChanged(LauncherThemeManager.getAccentColor(requireContext()));
 
+        View parent = (View) view.getParent();
+        if (parent != null && parent.getVisibility() == View.VISIBLE) {
+            onPageShown();
+        }
         return view;
     }
 
     public void onPageShown() {
         if (!isAdded() || rootView == null) return;
-        settings = ClientSettings.reloadLauncher(requireContext());
-        setWidgetsForSettings();
-        if (currentCategory == CAT_MULTIPLAYER) {
-            artworkCacheController.refresh();
-        } else if (currentCategory == CAT_GAMEDATA) {
-            gameDataController.refreshVerification();
-        } else if (currentCategory == CAT_SCREENSHOTS) {
-            screenshotController.refresh();
-        } else if (currentCategory == CAT_LOGS) {
-            diagnosticsController.refresh();
+        pageEverShown = true;
+        long curGen = ClientSettings.currentGeneration();
+        if (curGen != boundSettingsGen) {
+            settings = ClientSettings.loadLauncher(requireContext());
+            setWidgetsForSettings();
+            boundSettingsGen = curGen;
+        }
+        ensureCategoryLoaded(currentCategory);
+    }
+
+    /** Called by MainActivity only when actually returning from the :game process. */
+    public void onReturningFromGame() {
+        categoryLoaded[CAT_MULTIPLAYER] = false;
+        categoryLoaded[CAT_SCREENSHOTS] = false;
+        categoryLoaded[CAT_LOGS] = false;
+        boundSettingsGen = -1L;
+        if (isAdded() && rootView != null) {
+            View parent = (View) rootView.getParent();
+            if (parent != null && parent.getVisibility() == View.VISIBLE) {
+                onPageShown();
+            }
         }
     }
 
@@ -554,20 +574,35 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
             View panel = categoryPanels[index];
             panel.animate().cancel();
             panel.setAlpha(0f);
-            panel.setTranslationY(8f * getResources().getDisplayMetrics().density);
-            panel.animate().alpha(1f).translationY(0f).setDuration(180).start();
+            panel.setTranslationY(6f * getResources().getDisplayMetrics().density);
+            panel.animate().alpha(1f).translationY(0f).withLayer().setDuration(120).start();
         });
-        switchCategory(sLastCategory);
+        applyCategoryVisibility(sLastCategory);
+    }
+
+    private void applyCategoryVisibility(int catIdx) {
+        currentCategory = catIdx;
+        sLastCategory = catIdx;
+        for (int i = 0; i < categoryPanels.length; i++) {
+            View p = categoryPanels[i];
+            p.animate().cancel();
+            p.setLayerType(View.LAYER_TYPE_NONE, null);
+            p.setVisibility((i == catIdx) ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void switchCategory(int catIdx) {
-        currentCategory = catIdx;
-        sLastCategory = catIdx;
-
-        for (int i = 0; i < categoryPanels.length; i++) {
-            categoryPanels[i].setVisibility((i == catIdx) ? View.VISIBLE : View.GONE);
+        applyCategoryVisibility(catIdx);
+        if (pageEverShown) {
+            ensureCategoryLoaded(catIdx);
         }
+    }
 
+    private void ensureCategoryLoaded(int catIdx) {
+        if (catIdx < 0 || catIdx >= categoryLoaded.length || categoryLoaded[catIdx]) {
+            return;
+        }
+        categoryLoaded[catIdx] = true;
         if (catIdx == CAT_MULTIPLAYER) {
             artworkCacheController.refresh();
         } else if (catIdx == CAT_GAMEDATA) {
@@ -684,7 +719,16 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
                 int hue = Math.round(value);
                 if (tv_theme_hue_val != null) tv_theme_hue_val.setText(hue + "°");
                 if (fromUser) {
-                    LauncherThemeManager.setHue(requireContext(), hue);
+                    pendingHue = hue;
+                    if (!hueFrameScheduled && rootView != null) {
+                        hueFrameScheduled = true;
+                        rootView.postOnAnimation(() -> {
+                            hueFrameScheduled = false;
+                            if (isAdded() && pendingHue >= 0) {
+                                LauncherThemeManager.setHue(requireContext(), pendingHue);
+                            }
+                        });
+                    }
                 }
             });
         }
@@ -1315,6 +1359,7 @@ public class SettingsPageFragment extends Fragment implements LauncherThemeManag
     private void savePreference(String key, Object value) {
         settings.put(key, value);
         ClientSettings.setAsync(requireContext(), key, value);
+        boundSettingsGen = ClientSettings.currentGeneration();
     }
 
     void showAlertDialog(String message, DialogInterface.OnClickListener positiveListener, DialogInterface.OnClickListener negativeListener) {

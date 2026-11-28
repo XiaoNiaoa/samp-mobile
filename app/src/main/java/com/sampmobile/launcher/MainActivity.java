@@ -119,6 +119,7 @@ public class MainActivity extends AppCompatActivity
     private int currentTab = ServerAdapter.MODE_FAVORITES;
 
     private int currentPage = PAGE_SERVERS;
+    private boolean launchedGameSinceResume = false;
     private SettingsPageFragment.ViewBuilder settingsBuilder;
     private View[] pageViews;
     private ViewGroup[] navItems;
@@ -152,7 +153,7 @@ public class MainActivity extends AppCompatActivity
     private String detailAddress;
 
     private volatile int detailsGeneration = 0;
-    private final ExecutorService detailExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService detailExecutor = Executors.newFixedThreadPool(3);
 
     private final ActivityResultLauncher<String[]> gameDataZipPicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
@@ -327,18 +328,22 @@ public class MainActivity extends AppCompatActivity
      */
     private void scheduleSettingsPrewarm() {
         Looper.myQueue().addIdleHandler(() -> {
-            if (isFinishing() || isDestroyed()
-                    || getSupportFragmentManager().findFragmentByTag(TAG_SETTINGS) != null) {
+            if (isFinishing() || isDestroyed()) {
                 return false;
             }
-            if (settingsBuilder == null) {
-                settingsBuilder = new SettingsPageFragment.ViewBuilder(getLayoutInflater(), findViewById(R.id.page_settings));
-            } else if (!settingsBuilder.step()) {
-                ensurePageFragment(PAGE_SETTINGS);
+            FragmentManager fm = getSupportFragmentManager();
+            if (fm.findFragmentByTag(TAG_SETTINGS) == null) {
+                if (settingsBuilder == null) {
+                    settingsBuilder = new SettingsPageFragment.ViewBuilder(getLayoutInflater(), findViewById(R.id.page_settings));
+                } else if (!settingsBuilder.step()) {
+                    ensurePageFragment(PAGE_SETTINGS);
+                }
+                getWindow().getDecorView().post(this::scheduleSettingsPrewarm);
                 return false;
             }
-            // an idle handler only fires once per idle period: queue a message so the next slot comes around
-            getWindow().getDecorView().post(this::scheduleSettingsPrewarm);
+            if (fm.findFragmentByTag(TAG_MODS) == null) {
+                ensurePageFragment(PAGE_MODS);
+            }
             return false;
         });
     }
@@ -901,6 +906,8 @@ public class MainActivity extends AppCompatActivity
             Fragment frag = ensurePageFragment(page);
             if (frag instanceof SettingsPageFragment) {
                 ((SettingsPageFragment) frag).onPageShown();
+            } else if (frag instanceof ModsManagerFragment) {
+                ((ModsManagerFragment) frag).onPageShown();
             }
         }
 
@@ -916,13 +923,14 @@ public class MainActivity extends AppCompatActivity
         currentPage = page;
 
         out.animate().cancel();
+        out.setLayerType(View.LAYER_TYPE_NONE, null);
         out.setVisibility(View.GONE);
 
         in.animate().cancel();
         in.setAlpha(0f);
-        in.setTranslationY(10f * getResources().getDisplayMetrics().density);
+        in.setTranslationY(8f * getResources().getDisplayMetrics().density);
         in.setVisibility(View.VISIBLE);
-        in.animate().alpha(1f).translationY(0f).setDuration(200)
+        in.animate().alpha(1f).translationY(0f).withLayer().setDuration(130)
                 .setInterpolator(new DecelerateInterpolator(1.6f)).start();
 
         updateNavStyles(true);
@@ -930,7 +938,8 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onThemeColorChanged(int accentColor) {
-        LauncherThemeManager.applyThemeToTree(getWindow().getDecorView(), accentColor);
+        LauncherThemeManager.applyThemeToTree(findViewById(R.id.nav_rail), accentColor);
+        LauncherThemeManager.applyThemeToTree(findViewById(R.id.page_servers), accentColor);
         if (swipeRefreshLayout != null) {
             swipeRefreshLayout.setColorSchemeColors(accentColor);
         }
@@ -1040,27 +1049,30 @@ public class MainActivity extends AppCompatActivity
 
             infoBody.animate().cancel();
             infoBody.setAlpha(0f);
-            infoBody.animate().alpha(1f).setDuration(180).start();
+            infoBody.animate().alpha(1f).withLayer().setDuration(120).start();
         }
 
-        // fetch player list & rules in background
+        // fetch player list & rules in background (cancelled immediately if user clicks another row)
         String address = server.address();
         String charset = ClientSettings.getCharsetForLauncher(this);
         detailExecutor.execute(() -> {
+            if (gen != detailsGeneration) return;
             List<String[]> players = new ArrayList<>();
             List<String[]> rules = new ArrayList<>();
             SampQuery query = null;
             try {
-                query = new SampQuery(server.server_host, Integer.parseInt(server.server_port), charset);
+                query = new SampQuery(server.server_host, Integer.parseInt(server.server_port),
+                        charset, 1200, server.server_language, false);
                 players = query.getPlayers();
+                if (gen != detailsGeneration) return;
                 rules = query.getRules();
-            } catch (Exception e) {
-                e.printStackTrace();
+            } catch (Exception ignored) {
             } finally {
                 if (query != null) {
                     query.close();
                 }
             }
+            if (gen != detailsGeneration) return;
 
             String weburl = "", discordFromRules = "";
             List<String[]> visibleRules = new ArrayList<>();
@@ -1150,6 +1162,7 @@ public class MainActivity extends AppCompatActivity
         } else if (Utils.addServerToFavorites(this, address)) {
             Toast.makeText(this, R.string.server_added, Toast.LENGTH_LONG).show();
         }
+        serverAdapter.invalidateLocalCache(ServerAdapter.MODE_FAVORITES);
         updateFavoriteButton(server);
         if (currentTab == ServerAdapter.MODE_FAVORITES) {
             refreshServers();
@@ -1195,6 +1208,9 @@ public class MainActivity extends AppCompatActivity
 
         @Override
         public void onFavoriteServerAdded() {
+            if (serverAdapter != null) {
+                serverAdapter.invalidateLocalCache(ServerAdapter.MODE_FAVORITES);
+            }
             if (currentTab == ServerAdapter.MODE_FAVORITES) {
                 refreshServers();
             }
@@ -1214,6 +1230,10 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void launchGameProcess() {
+        launchedGameSinceResume = true;
+        if (serverAdapter != null) {
+            serverAdapter.invalidateLocalCache(ServerAdapter.MODE_RECENT);
+        }
         try {
             android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
             if (am != null) {
@@ -1280,12 +1300,17 @@ public class MainActivity extends AppCompatActivity
     @Override
     protected void onResume() {
         super.onResume();
+        if (!launchedGameSinceResume) {
+            return;
+        }
+        launchedGameSinceResume = false;
         ClientSettings.reloadLauncher(this);
-        if (currentPage == PAGE_SETTINGS) {
-            Fragment f = getSupportFragmentManager().findFragmentByTag(TAG_SETTINGS);
-            if (f instanceof SettingsPageFragment) {
-                ((SettingsPageFragment) f).onPageShown();
-            }
+        Fragment f = getSupportFragmentManager().findFragmentByTag(TAG_SETTINGS);
+        if (f instanceof SettingsPageFragment) {
+            ((SettingsPageFragment) f).onReturningFromGame();
+        }
+        if (currentTab == ServerAdapter.MODE_RECENT && serverAdapter != null) {
+            refreshServers();
         }
     }
 

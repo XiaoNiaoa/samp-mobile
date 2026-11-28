@@ -306,6 +306,12 @@ public final class ClientSettings {
     private static long sLauncherLoadedMtime = -1L;
     private static long sWriteGeneration = 0L;
 
+    public static long currentGeneration() {
+        synchronized (LOCK) {
+            return sWriteGeneration;
+        }
+    }
+
     private String serverHost = "127.0.0.1";
     private int serverPort = 7777;
     private String serverPassword = "";
@@ -608,6 +614,7 @@ public final class ClientSettings {
             }
 
             sLauncherCache = loaded.copy();
+            ++sWriteGeneration;
             if (needsWrite && file != null) {
                 writeLocked(file, sLauncherCache);
             } else {

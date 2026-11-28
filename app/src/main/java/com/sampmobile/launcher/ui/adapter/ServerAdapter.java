@@ -3,6 +3,9 @@ package com.sampmobile.launcher.ui.adapter;
 import android.app.Activity;
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -57,6 +60,9 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
     private static final int INITIAL_VIEWPORT_PING_BATCH = 32;
     private static final int MAX_ENCODING_RECOVERY_PROBES = 36;
     private static final long DIRECTORY_UI_CACHE_TTL_MS = 60_000L;
+    private static final long UI_PING_BATCH_MS = 96L;
+    private static final Object PAYLOAD_PING = new Object();
+    private static final Object PAYLOAD_SELECTION = new Object();
 
     public interface OnServerSelectListener {
         void onServerSelected(ServerModel server);
@@ -140,6 +146,44 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
     private final int[] langCounts = new int[ServerFilterEngine.LANGUAGES.size()];
     private int verifiedDirectoryCount = 0;
     private long directoryLoadedAtMs = 0L;
+    private boolean favoritesLoaded = false;
+    private boolean recentLoaded = false;
+
+    private Drawable cachedSelectedDrawable = null;
+    private int cachedSelectedAccent = 0;
+    private ColorStateList cachedAccentTint = null;
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Set<ServerModel> pendingPingItems = new LinkedHashSet<>();
+    private boolean pendingStructureRefresh = false;
+    private boolean pingFlushScheduled = false;
+    private final Runnable flushPendingPingsRunnable = this::flushPendingPings;
+
+    private void flushPendingPings() {
+        pingFlushScheduled = false;
+        if (activity.isFinishing() || activity.isDestroyed()) {
+            pendingPingItems.clear();
+            pendingStructureRefresh = false;
+            return;
+        }
+        if (pendingStructureRefresh && isDirectoryMode(mode)) {
+            pendingStructureRefresh = false;
+            pendingPingItems.clear();
+            recomputeDirectoryStats();
+            applyFilters();
+            if (listLoadedListener != null) listLoadedListener.onListLoaded();
+            return;
+        }
+        pendingStructureRefresh = false;
+        if (pendingPingItems.isEmpty()) return;
+        for (ServerModel m : pendingPingItems) {
+            int idx = indexOf(m);
+            if (idx >= 0) {
+                notifyItemChanged(idx, PAYLOAD_PING);
+            }
+        }
+        pendingPingItems.clear();
+    }
 
     private int mode = MODE_FAVORITES;
     private String selectedAddress = null;
@@ -170,12 +214,24 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
     }
 
     public boolean hasCachedDataForMode(int targetMode) {
+        if (targetMode == MODE_FAVORITES && favoritesLoaded) return true;
+        if (targetMode == MODE_RECENT && recentLoaded) return true;
         if (isDirectoryMode(mode) && isDirectoryMode(targetMode) && !allServers.isEmpty()) {
             return true;
         }
         int key = isDirectoryMode(targetMode) ? MODE_INTERNET : targetMode;
         List<ServerModel> c = listCache.get(key);
         return c != null && !c.isEmpty();
+    }
+
+    public void invalidateLocalCache(int targetMode) {
+        if (targetMode == MODE_FAVORITES) {
+            favoritesLoaded = false;
+            listCache.remove(MODE_FAVORITES);
+        } else if (targetMode == MODE_RECENT) {
+            recentLoaded = false;
+            listCache.remove(MODE_RECENT);
+        }
     }
 
     public Set<String> getRegionalCountries() {
@@ -336,13 +392,34 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
         return new ViewHolder(view);
     }
 
-    public void onBindViewHolder(ViewHolder viewHolder, int position) {
-        if (position >= serverModel.size()) {
+    @Override
+    public void onBindViewHolder(@NonNull ViewHolder viewHolder, int position, @NonNull List<Object> payloads) {
+        if (payloads.isEmpty()) {
+            onBindViewHolder(viewHolder, position);
             return;
         }
-
+        if (position >= serverModel.size()) return;
         ServerModel server = serverModel.get(position);
+        int accentColor = LauncherThemeManager.getAccentColor(activity);
+        ensureThemeCaches(accentColor);
+        for (Object p : payloads) {
+            if (p == PAYLOAD_PING) {
+                bindServerMetrics(viewHolder, server);
+            } else if (p == PAYLOAD_SELECTION) {
+                bindRowSelection(viewHolder, server);
+            }
+        }
+    }
 
+    private void ensureThemeCaches(int accentColor) {
+        if (cachedSelectedDrawable == null || cachedSelectedAccent != accentColor) {
+            cachedSelectedAccent = accentColor;
+            cachedSelectedDrawable = LauncherThemeManager.createSelectedRowDrawable(activity, accentColor);
+            cachedAccentTint = ColorStateList.valueOf(accentColor);
+        }
+    }
+
+    private void bindServerMetrics(ViewHolder viewHolder, ServerModel server) {
         viewHolder.server_name.setText(server.server_name);
         String ping = server.server_ping;
         boolean hasPing = !("-".equals(ping) || ping.isEmpty());
@@ -367,15 +444,29 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
         viewHolder.server_players.setTextColor(activity.getColor(players > 0 ? R.color.launcher_text : R.color.launcher_text_dim));
         viewHolder.server_players_bar.setProgress(maxPlayers > 0 ? Math.min(100, players * 100 / maxPlayers) : 0);
         viewHolder.server_password.setVisibility("1".equals(server.server_password) ? View.VISIBLE : View.GONE);
+    }
 
+    private void bindRowSelection(ViewHolder viewHolder, ServerModel server) {
         boolean selected = server.address().equals(selectedAddress);
-        int accentColor = LauncherThemeManager.getAccentColor(activity);
-        viewHolder.server_players_bar.setProgressTintList(ColorStateList.valueOf(accentColor));
         if (selected) {
-            viewHolder.server_item.setBackground(LauncherThemeManager.createSelectedRowDrawable(activity, accentColor));
+            viewHolder.server_item.setBackground(cachedSelectedDrawable);
         } else {
             viewHolder.server_item.setBackgroundResource(R.drawable.ui_row_bg);
         }
+    }
+
+    public void onBindViewHolder(ViewHolder viewHolder, int position) {
+        if (position >= serverModel.size()) {
+            return;
+        }
+
+        ServerModel server = serverModel.get(position);
+        int accentColor = LauncherThemeManager.getAccentColor(activity);
+        ensureThemeCaches(accentColor);
+
+        bindServerMetrics(viewHolder, server);
+        viewHolder.server_players_bar.setProgressTintList(cachedAccentTint);
+        bindRowSelection(viewHolder, server);
 
         viewHolder.server_item.setOnClickListener(v -> {
             String address = server.address();
@@ -388,7 +479,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
             for (int i = 0; i < count; i++) {
                 String a = serverModel.get(i).address();
                 if (a.equals(old) || a.equals(address)) {
-                    notifyItemChanged(i);
+                    notifyItemChanged(i, PAYLOAD_SELECTION);
                 }
             }
             if (selectListener != null) selectListener.onServerSelected(server);
@@ -422,6 +513,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
         }
 
         generation++;
+        clearPendingPingBatch();
         queuedPings.clear();
         int prevCacheKey = wasDir ? MODE_INTERNET : mode;
         listCache.put(prevCacheKey, new ArrayList<>(allServers));
@@ -444,7 +536,32 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
             return;
         }
 
+        // Fast path 3: Local Favorites / Recent already loaded and unchanged — instant 0ms switch
+        if ((mode == MODE_FAVORITES && favoritesLoaded && cached != null)
+                || (mode == MODE_RECENT && recentLoaded && cached != null)) {
+            if (listLoadedListener != null) listLoadedListener.onListLoaded();
+            return;
+        }
+
         loadAndQuery(false);
+    }
+
+    private void clearPendingPingBatch() {
+        uiHandler.removeCallbacks(flushPendingPingsRunnable);
+        pingFlushScheduled = false;
+        pendingPingItems.clear();
+        pendingStructureRefresh = false;
+    }
+
+    private void schedulePingUiUpdate(ServerModel model, boolean structureChanged) {
+        pendingPingItems.add(model);
+        if (structureChanged) {
+            pendingStructureRefresh = true;
+        }
+        if (!pingFlushScheduled) {
+            pingFlushScheduled = true;
+            uiHandler.postDelayed(flushPendingPingsRunnable, UI_PING_BATCH_MS);
+        }
     }
 
     public void setMode(int mode) {
@@ -454,6 +571,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
     /** Reload current mode's source (forcing fresh network pull on directory tabs) and re-query. */
     public void refresh() {
         generation++;
+        clearPendingPingBatch();
         queuedPings.clear();
         for (ServerModel s : allServers) {
             s.ping_queried = false;
@@ -466,6 +584,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
     }
 
     public void shutdown() {
+        clearPendingPingBatch();
         ioExecutor.shutdownNow();
         queryPool.shutdownNow();
     }
@@ -531,6 +650,10 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
                 if (dirMode) {
                     directoryLoadedAtMs = System.currentTimeMillis();
                     recomputeDirectoryStats();
+                } else if (listMode == MODE_FAVORITES) {
+                    favoritesLoaded = true;
+                } else if (listMode == MODE_RECENT) {
+                    recentLoaded = true;
                 }
                 applyFilters();
 
@@ -621,8 +744,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
                     model.server_gamemode = "-";
                 }
                 model.server_ping = "-";
-                int idx = indexOf(model);
-                if (idx >= 0) notifyItemChanged(idx);
+                schedulePingUiUpdate(model, false);
             });
         }
     }
@@ -701,14 +823,7 @@ public class ServerAdapter extends RecyclerView.Adapter<ServerAdapter.ViewHolder
                 model.needs_encoding_refresh = false;
                 model.ping_queried = true;
 
-                if (maskOrVisibilityChanged && isDirectoryMode(mode)) {
-                    recomputeDirectoryStats();
-                    applyFilters();
-                    if (listLoadedListener != null) listLoadedListener.onListLoaded();
-                } else {
-                    int idx = indexOf(model);
-                    if (idx >= 0) notifyItemChanged(idx);
-                }
+                schedulePingUiUpdate(model, maskOrVisibilityChanged && isDirectoryMode(mode));
                 if (selectListener != null && model.address().equals(selectedAddress)) {
                     selectListener.onServerSelected(model);
                 }

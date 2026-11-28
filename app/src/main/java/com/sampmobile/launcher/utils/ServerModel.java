@@ -24,6 +24,8 @@ public class ServerModel {
     public boolean needs_encoding_refresh = false;
     public boolean unverified_candidate = false;
     public volatile boolean ping_queried = false;
+    private String cachedAddress;
+    private String cachedNormalizedKey;
 
     public ServerModel(String server_name, String server_host, String server_port, String server_password, String server_gamemode, String server_players, String server_maxplayers, String server_language) {
         this.server_name = server_name;
@@ -37,12 +39,22 @@ public class ServerModel {
     }
 
     public String address() {
-        return server_host + ":" + server_port;
+        String a = cachedAddress;
+        if (a == null) {
+            a = server_host + ":" + server_port;
+            cachedAddress = a;
+        }
+        return a;
     }
 
     public String normalizedKey() {
-        String h = server_host == null ? "" : server_host.trim().toLowerCase(java.util.Locale.US);
-        String p = server_port == null ? "7777" : server_port.trim();
-        return h + ":" + p;
+        String k = cachedNormalizedKey;
+        if (k == null) {
+            String h = server_host == null ? "" : server_host.trim().toLowerCase(java.util.Locale.US);
+            String p = server_port == null ? "7777" : server_port.trim();
+            k = h + ":" + p;
+            cachedNormalizedKey = k;
+        }
+        return k;
     }
 }
