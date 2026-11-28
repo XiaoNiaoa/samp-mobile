@@ -21,7 +21,6 @@
 #include "../Net/NetGame.h"
 #include "../Net/MenuPool.h"
 #include "../Net/PlayerBubblePool.h"
-#include "../Net/TextDrawPool.h"
 #include "../Net/TextLabelPool.h"
 
 float UI::GetFontSize()
@@ -259,7 +258,6 @@ void UI::drawList()
 		if (pPlayerTags && Settings::showNameTags()) pPlayerTags->Render(renderer());
 		if (pNetGame && pNetGame->GetTextLabelPool()) pNetGame->GetTextLabelPool()->Render(renderer());
 		if (pNetGame && pNetGame->GetPlayerBubblePool()) pNetGame->GetPlayerBubblePool()->Render(renderer());
-		if (pNetGame && pNetGame->GetTextDrawPool()) pNetGame->GetTextDrawPool()->DrawImGui(renderer());
 		if (pNetGame && pNetGame->GetObjectPool()) pNetGame->GetObjectPool()->DrawSelectOverlay(renderer());
 		if (pNetGame && pNetGame->GetMenuPool()) pNetGame->GetMenuPool()->Render(renderer());
 		if (pGame) pGame->DrawImGuiGameText(renderer());
