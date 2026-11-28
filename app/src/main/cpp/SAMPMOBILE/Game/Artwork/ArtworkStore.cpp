@@ -8,6 +8,7 @@
 #include "../Engine/Symbols.h"
 
 #include <SA.h>
+#include "ColFaceGroupBuilder.h"
 #include <StreamingInfo.h>
 #include <RenderWare/rw.h>
 #include <spdlog/spdlog.h>
@@ -432,6 +433,9 @@ void ArtworkStore::destroyLoadedSlot(ArtworkManifest& manifest, LoadedSlot& ls)
 			eng::fn::CPedModelInfo_DeleteRwObject(ls.modelInfo);
 		} else {
 			eng::fn::CAtomicModelInfo_DeleteRwObject(ls.modelInfo);
+		}
+		if (ls.ownedFaceGroupBuf) {
+			colaccel::detachAndFreeFaceGroups(ls.ownedCol, ls.ownedFaceGroupBuf);
 		}
 		if (ls.ownedCol) {
 			eng::fn::CBaseModelInfo_SetColModel(ls.modelInfo, static_cast<sa::CColModel*>(nullptr), false);
@@ -1123,6 +1127,7 @@ int32_t ArtworkStore::ensureCustomObjectLoaded(ArtworkManifest& manifest, const 
 	}
 
 	sa::CColModel* ownedCol = nullptr;
+	uint8_t* ownedFaceGroupBuf = nullptr;
 	if (!validated.embeddedCol.empty()) {
 		char colName[32];
 		std::snprintf(colName, sizeof(colName), "dl_col_%d", serverModelId);
@@ -1136,6 +1141,10 @@ int32_t ArtworkStore::ensureCustomObjectLoaded(ArtworkManifest& manifest, const 
 			m_failedModels.insert(serverModelId);
 			return -1;
 		}
+		// MakeMultipleAlloc strips COL2/3/4 face groups; synthesize tight spatial TFaceGroup
+		// clusters (>32 tris) so native CCollision::ProcessColModels and our ProcessVerticalLine /
+		// ProcessLineOfSight hooks prune triangles in O(log N) instead of brute-forcing thousands.
+		ownedFaceGroupBuf = colaccel::buildFaceGroupsForColModel(ownedCol);
 		eng::fn::CBaseModelInfo_SetColModel(model, ownedCol, true);
 	}
 
@@ -1154,6 +1163,7 @@ int32_t ArtworkStore::ensureCustomObjectLoaded(ArtworkManifest& manifest, const 
 	ls.isPed = false;
 	ls.modelInfo = model;
 	ls.ownedCol = ownedCol;
+	ls.ownedFaceGroupBuf = ownedFaceGroupBuf;
 	ls.estimatedBytes = dffPayload.size() * 2u + validated.embeddedCol.size() * 3u;
 	ls.lastUseSeq = ++m_useSeq;
 	ls.idleSinceMs = 0u;

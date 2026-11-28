@@ -39,9 +39,11 @@ public:
 	void Render(ImGuiRenderer* renderer);
 
 private:
-	void Draw(ImGuiRenderer* renderer, sa::CVector vecPos, const char* text, uint32_t dwColor);
+	void Draw(ImGuiRenderer* renderer, float screenX, float screenY, const char* text, uint32_t dwColor);
 
 private:
 	TEXT_LABEL m_TextLabels[MAX_TEXT_LABELS];
 	bool m_bSlotUsed[MAX_TEXT_LABELS];
+	uint32_t m_dwLastLosTick[MAX_TEXT_LABELS];
+	bool m_bLastLosVisible[MAX_TEXT_LABELS];
 };

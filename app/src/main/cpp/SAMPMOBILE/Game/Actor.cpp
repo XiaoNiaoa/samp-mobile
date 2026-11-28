@@ -101,11 +101,16 @@ void CActor::SetInvulnerable(bool bInvulnerable)
 	m_actor->physicalFlags.bDisableMoveForce = bInvulnerable ? 1 : 0;
 
 	if (bInvulnerable) {
+		// Invulnerable SA-MP actors are completely static server-positioned NPCs:
+		// skip their own 5-pass CPhysical::ProcessCollision sweep while keeping them
+		// in ms_aRepeatSectors so players, vehicles, and bullets still collide with them.
+		m_actor->m_nFlags |= 0x80000000u;
 		m_actor->ResetMoveSpeed();
 		m_actor->ResetTurnSpeed();
 		ScriptCommand(&set_actor_immunities, m_gtaId, 1, 1, 1, 1, 1);
 	}
 	else {
+		m_actor->m_nFlags &= ~0x80000000u;
 		ScriptCommand(&set_actor_immunities, m_gtaId, 0, 0, 0, 1, 0);
 	}
 }

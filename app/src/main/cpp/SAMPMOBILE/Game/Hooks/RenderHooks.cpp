@@ -13,6 +13,7 @@
 #include "../../Net/NetGame.h"
 #include "../../Net/GangZonePool.h"
 #include "../../Net/TextDrawPool.h"
+#include "../../Net/VehiclePool.h"
 #include "../../Client.h"
 #include "../../Settings.h"
 #include <Memory.h>
@@ -128,14 +129,98 @@ struct ManualObjectRenderEntry {
 	CObject* obj;
 	sa::CBaseModelInfo* modelInfo;
 	float distSq;
+	uint32_t sortKey;
 };
 
-// render is single-threaded on the game thread — static storage avoids a
-// 16KB+ stack allocation every frame
+// render is single-threaded on the game thread — static storage avoids
+// per-frame stack allocations
+ManualObjectRenderEntry s_opaqueObjects[MAX_OBJECTS];
+int s_opaqueObjectCount = 0;
 ManualObjectRenderEntry s_transparentObjects[MAX_OBJECTS];
 int s_transparentObjectCount = 0;
 
+// Reads RpMorphTarget[0].boundingSphere from an rpATOMIC using disassembly-verified
+// arm32/arm64 RenderWare struct offsets (see rxOpenGLDefaultAtomicAllInOneNode below).
+inline bool ReadAtomicGeometrySphere(const RwObject *rwObj, sa::CVector &outCenter, float &outRadius) noexcept
+{
+	const auto *rwBytes = reinterpret_cast<const uint8_t *>(rwObj);
+	if (!rwBytes || rwBytes[0] != 1 /* rpATOMIC */)
+	{
+		return false;
+	}
+	constexpr size_t kAtomicGeomOff      = VER_x32 ? 24u : 48u;
+	constexpr size_t kGeomNumMtOff       = VER_x32 ? 24u : 32u;
+	constexpr size_t kGeomMorphTargetOff = VER_x32 ? 96u : 160u;
+	constexpr size_t kMorphSphereOff     = VER_x32 ? 4u  : 8u;
+	const auto *geom = *reinterpret_cast<const uint8_t *const *>(rwBytes + kAtomicGeomOff);
+	if (!geom || *reinterpret_cast<const int32_t *>(geom + kGeomNumMtOff) < 1)
+	{
+		return false;
+	}
+	const auto *mt = *reinterpret_cast<const uint8_t *const *>(geom + kGeomMorphTargetOff);
+	if (!mt)
+	{
+		return false;
+	}
+	const auto *sp = reinterpret_cast<const float *>(mt + kMorphSphereOff);
+	const float r = sp[3];
+	if (!std::isfinite(r) || r <= 0.0f)
+	{
+		return false;
+	}
+	outCenter.x = sp[0];
+	outCenter.y = sp[1];
+	outCenter.z = sp[2];
+	outRadius = r;
+	return true;
+}
+
+inline float ComputeTrueBoundSphere(const sa::CBaseModelInfo *modelInfo, const RwObject *rwObj,
+	sa::CVector &outCenter) noexcept
+{
+	outCenter = sa::CVector{0.0f, 0.0f, 0.0f};
+	float bestR = 0.0f;
+	if (modelInfo && modelInfo->m_pColModel)
+	{
+		const sa::CSphere &sphere = modelInfo->m_pColModel->m_boundSphere;
+		if (std::isfinite(sphere.m_fRadius) && sphere.m_fRadius > 0.0f)
+		{
+			bestR = sphere.m_fRadius;
+			outCenter = sphere.m_vecCenter;
+		}
+	}
+	sa::CVector geomCenter{};
+	float geomR = 0.0f;
+	if (ReadAtomicGeometrySphere(rwObj, geomCenter, geomR) && geomR > bestR)
+	{
+		bestR = geomR;
+		outCenter = geomCenter;
+	}
+	return bestR;
+}
+
+inline sa::CVector TransformLocalCenter(const sa::CEntity *entity, const sa::CVector &localCenter) noexcept
+{
+	const sa::CVector &pos = entity->GetPosition();
+	if (!entity->m_matrix)
+	{
+		return pos;
+	}
+	const sa::CVector &right = entity->GetRight();
+	const sa::CVector &fwd = entity->GetForward();
+	const sa::CVector &up = entity->GetUp();
+	return sa::CVector{
+		pos.x + right.x * localCenter.x + fwd.x * localCenter.y + up.x * localCenter.z,
+		pos.y + right.y * localCenter.x + fwd.y * localCenter.y + up.y * localCenter.z,
+		pos.z + right.z * localCenter.x + fwd.z * localCenter.y + up.z * localCenter.z
+	};
+}
+
 } // namespace
+
+// Track CMirrors::RenderReflections() so CRenderer_RenderEverythingBarRoads never
+// redraws hundreds of OOB custom objects into the spherical vehicle env-map pass.
+static bool s_bInReflectionPass = false;
 
 DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 {
@@ -156,6 +241,16 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		return;
 	}
 
+	const uint8_t *pRefl = eng::as<uint8_t *>(eng::Sym::CMirrors_bRenderingReflection);
+	const int32_t *pMirrorType = eng::as<int32_t *>(eng::Sym::CMirrors_TypeOfMirror);
+	const bool bIsReflectionPass = s_bInReflectionPass
+		|| (pRefl && *pRefl != 0)
+		|| (pMirrorType && *pMirrorType == 3);
+	if (bIsReflectionPass)
+	{
+		return;
+	}
+
 	RwMatrix matCam{};
 	bool hasCam = false;
 	if (pGame && pGame->GetCamera())
@@ -167,6 +262,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	{
 		return;
 	}
+
 	float lodScale = 1.0f;
 	if (auto *pLodScale = eng::as<float *>(eng::Sym::CRenderer_ms_lodDistScale))
 	{
@@ -177,14 +273,12 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	}
 	sa::CCamera* pEngineCam = &sa::getTheCamera();
 
-	// Full CObject::PreRender + CObject::SetupLighting (dynamic point lights, scorch/burn,
-	// col-lighting) is only perceptible within GTA:SA's native ~300m non-LOD range. Beyond 300m
-	// (e.g. 600m-9999m custom map/LOD chunks), dispatch RpAtomic/RpClump directly like PC SA-MP
-	// CObject::Draw -> GameRwRenderObject, avoiding hundreds of per-frame CPointLights scans and
-	// GLES directional-light shader uniform state flips.
+	// Match HEAD / PC SA-MP: full CObject::PreRender + CRenderer::RenderOneNonRoad
+	// within GTA:SA's native 300m range; direct RpAtomic/RpClump dispatch only beyond 300m.
 	constexpr float kFullPreRenderDistSq = 300.0f * 300.0f;
+	bool touchedCullMode = false;
 
-	auto renderRwObjectDirect = [](CObject *obj, sa::CPhysical *entity, sa::CBaseModelInfo *modelInfo) {
+	auto renderRwObjectDirect = [&touchedCullMode](CObject *obj, sa::CPhysical *entity, sa::CBaseModelInfo *modelInfo) {
 		RwObject *rwObj = entity ? entity->m_pRwObject : nullptr;
 		if (!rwObj)
 		{
@@ -204,6 +298,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 			? static_cast<uintptr_t>(rwCULLMODECULLBACK)
 			: static_cast<uintptr_t>(rwCULLMODECULLNONE);
 		RwRenderStateSet(rwRENDERSTATECULLMODE, reinterpret_cast<void *>(cullMode));
+		touchedCullMode = true;
 
 		const uint8_t rwType = *reinterpret_cast<const uint8_t *>(rwObj);
 		if (rwType == 1 /* rpATOMIC */)
@@ -229,7 +324,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		}
 	};
 
-	auto renderManualObject = [&renderRwObjectDirect](CObject *obj, sa::CBaseModelInfo *modelInfo, float distSq) {
+	auto renderManualObject = [&](CObject *obj, sa::CBaseModelInfo *modelInfo, float distSq) {
 		if (obj->NeedsPerFrameMatrixSync())
 		{
 			obj->UpdateRwMatrixAndFrame();
@@ -244,6 +339,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		}
 	};
 
+	s_opaqueObjectCount = 0;
 	s_transparentObjectCount = 0;
 
 	for (int i = 0; i <= largestId && i < MAX_OBJECTS; i++)
@@ -260,31 +356,27 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		}
 
 		const sa::CVector &pos = pEntity->GetPosition();
-		const float dx = pos.x - matCam.pos.x;
-		const float dy = pos.y - matCam.pos.y;
-		const float dz = pos.z - matCam.pos.z;
-		const float distSq = dx * dx + dy * dy + dz * dz;
+		const float origDx = pos.x - matCam.pos.x;
+		const float origDy = pos.y - matCam.pos.y;
+		const float origDz = pos.z - matCam.pos.z;
+		const float origDistSq = origDx * origDx + origDy * origDy + origDz * origDz;
 
-		// server-specified draw distance is position-independent: it caps
-		// OOB objects exactly like in-bounds ones (an unset 0 means no
-		// server-imposed cap — OOB map structures stay visible as before)
 		const float drawDist = pObject->m_fDrawDistance;
-		if (drawDist > 0.0f && distSq > drawDist * drawDist)
+		if (drawDist > 0.0f && origDistSq > drawDist * drawDist)
 		{
 			continue;
 		}
 
-		sa::CBaseModelInfo *pModelInfo = GetModelInfoByID(pObject->GetModelIndex());
+		const int modelIndex = pObject->GetModelIndex();
+		sa::CBaseModelInfo *pModelInfo = GetModelInfoByID(modelIndex);
 
+		// Out-of-bounds SA-MP objects (m_bForceRender) are owned EXCLUSIVELY by this
+		// pass (CRenderer_SetupEntityVisibility skips them so GTA:SA's ScanWorld never
+		// double-renders them or fades large chunks to alpha=0 by origin distance).
+		// In-bounds objects are owned by GTA:SA's native ScanWorld, except when server
+		// drawDist exceeds the engine's native LOD distance (PC SA-MP long-range parity).
 		if (!pObject->m_bForceRender)
 		{
-			// in-bounds objects need manual rendering only when the server
-			// asked for a draw distance beyond what the engine's ScanWorld
-			// covers — inside the native range the engine already drew them
-			if (drawDist <= 0.0f)
-			{
-				continue;
-			}
 			float nativeDist = 300.0f;
 			if (pModelInfo && pModelInfo->m_lodDistance > 0.0f)
 			{
@@ -294,50 +386,63 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 					nativeDist = scaled;
 				}
 			}
-			if (distSq <= nativeDist * nativeDist)
+			if (!(drawDist > nativeDist && origDistSq > nativeDist * nativeDist))
 			{
 				continue;
 			}
 		}
 
-		// sphere-frustum culling with the collision bound sphere transformed
-		// into world space — the same test PC SA-MP applies per object in
-		// CObject::Draw (GameTestCameraSphere wraps CCamera::IsSphereVisible)
-		float boundRadius = 50.0f;
-		sa::CVector worldCentre = pos;
-		if (pModelInfo && pModelInfo->m_pColModel)
+		sa::CVector localCenter{0.0f, 0.0f, 0.0f};
+		float boundRadius = ComputeTrueBoundSphere(pModelInfo, pEntity->m_pRwObject, localCenter);
+		if (boundRadius <= 0.0f)
 		{
-			const sa::CSphere &sphere = pModelInfo->m_pColModel->m_boundSphere;
-			if (sphere.m_fRadius > 0.0f)
-			{
-				boundRadius = sphere.m_fRadius;
-			}
-			const sa::CVector &c = sphere.m_vecCenter;
-			if (pEntity->m_matrix)
-			{
-				const sa::CVector &right = pEntity->GetRight();
-				const sa::CVector &fwd = pEntity->GetForward();
-				const sa::CVector &up = pEntity->GetUp();
-				worldCentre.x = pos.x + right.x * c.x + fwd.x * c.y + up.x * c.z;
-				worldCentre.y = pos.y + right.y * c.x + fwd.y * c.y + up.y * c.z;
-				worldCentre.z = pos.z + right.z * c.x + fwd.z * c.y + up.z * c.z;
-			}
+			boundRadius = 50.0f;
 		}
-		if (!eng::fn::CCamera_IsSphereVisible( pEngineCam, &worldCentre, boundRadius))
+
+		const sa::CVector worldCentre = TransformLocalCenter(pEntity, localCenter);
+		if (!eng::fn::CCamera_IsSphereVisible(pEngineCam, &worldCentre, boundRadius))
 		{
 			continue;
 		}
+
+		const float dx = worldCentre.x - matCam.pos.x;
+		const float dy = worldCentre.y - matCam.pos.y;
+		const float dz = worldCentre.z - matCam.pos.z;
+		const float distSq = dx * dx + dy * dy + dz * dz;
 
 		// model flags bit1 (drawLast) marks alpha/transparent objects — they
 		// must render after all opaque geometry far-to-near
 		const bool bDrawLast = pModelInfo && ((pModelInfo->m_flags >> 1) & 1);
 		if (bDrawLast && s_transparentObjectCount < MAX_OBJECTS)
 		{
-			s_transparentObjects[s_transparentObjectCount++] = {pObject, pModelInfo, distSq};
+			s_transparentObjects[s_transparentObjectCount++] = {pObject, pModelInfo, distSq, 0u};
 			continue;
 		}
 
-		renderManualObject(pObject, pModelInfo, distSq);
+		if (s_opaqueObjectCount < MAX_OBJECTS)
+		{
+			const uint32_t txdKey = pModelInfo ? static_cast<uint32_t>(static_cast<uint16_t>(pModelInfo->m_txdIndex)) : 0u;
+			const uint32_t sortKey = (txdKey << 16) | static_cast<uint32_t>(static_cast<uint16_t>(modelIndex));
+			s_opaqueObjects[s_opaqueObjectCount++] = {pObject, pModelInfo, distSq, sortKey};
+		}
+		else
+		{
+			renderManualObject(pObject, pModelInfo, distSq);
+		}
+	}
+
+	// Group opaque objects by (txdIndex, modelIndex) so shared VBOs and TXD textures stay hot
+	// in RQVertexBuffer::Set and ES2BindActiveTextures caches.
+	if (s_opaqueObjectCount > 1)
+	{
+		std::sort(s_opaqueObjects, s_opaqueObjects + s_opaqueObjectCount,
+			[](const ManualObjectRenderEntry &a, const ManualObjectRenderEntry &b) {
+				return a.sortKey < b.sortKey;
+			});
+	}
+	for (int o = 0; o < s_opaqueObjectCount; ++o)
+	{
+		renderManualObject(s_opaqueObjects[o].obj, s_opaqueObjects[o].modelInfo, s_opaqueObjects[o].distSq);
 	}
 
 	if (s_transparentObjectCount > 1)
@@ -350,6 +455,11 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	for (int t = 0; t < s_transparentObjectCount; ++t)
 	{
 		renderManualObject(s_transparentObjects[t].obj, s_transparentObjects[t].modelInfo, s_transparentObjects[t].distSq);
+	}
+
+	if (touchedCullMode)
+	{
+		RwRenderStateSet(rwRENDERSTATECULLMODE, reinterpret_cast<void *>(static_cast<uintptr_t>(rwCULLMODECULLBACK)));
 	}
 }
 
@@ -806,9 +916,50 @@ DECL_HOOK(void*, RenderQueue_Ctor, void* self)
 	return ret;
 }
 
+DECL_HOOK(int32_t, CRenderer_SetupEntityVisibility, sa::CEntity *entity, float &outDist)
+{
+	if (entity && entity->m_nType == sa::ENTITY_TYPE_OBJECT)
+	{
+		const sa::CVector &pos = entity->GetPosition();
+		if (std::fabs(pos.x) > 3000.0f || std::fabs(pos.y) > 3000.0f)
+		{
+			// Out-of-bounds world SA-MP CObjects (m_bForceRender, NOT ped-attached objects
+			// which live outside CObjectPool and rely on ScanWorld!) are rendered exclusively
+			// by CRenderer_RenderEverythingBarRoads. Returning 0 here eliminates both 200%
+			// double-rendering and GTA:SA's origin-distance alpha=0 fade-out on large OOB chunks.
+			if (CObject *pObj = CObject::FindByGtaEntity(entity); pObj && pObj->m_bForceRender && !pObj->m_bAttachedToPed)
+			{
+				return 0;
+			}
+		}
+	}
+
+	return CRenderer_SetupEntityVisibility(entity, outDist);
+}
+
+DECL_HOOK(void, CMirrors_RenderReflections)
+{
+	const int32_t *pMirrorType = eng::as<int32_t *>(eng::Sym::CMirrors_TypeOfMirror);
+	const bool bHasInteriorMirror = (pMirrorType && *pMirrorType != 0 && *pMirrorType != 3);
+	if (!bHasInteriorMirror && pNetGame)
+	{
+		if (CVehiclePool *pVehPool = pNetGame->GetVehiclePool(); pVehPool && pVehPool->m_iLastVehicleID < 0)
+		{
+			// Zero streamed vehicles and no interior mirror: spherical vehicle chrome env-map is unused.
+			return;
+		}
+	}
+
+	s_bInReflectionPass = true;
+	CMirrors_RenderReflections();
+	s_bInReflectionPass = false;
+}
+
 void InstallRenderHooks()
 {
 	REG_HOOK(Boot, RenderQueue_Ctor, RenderQueue_Ctor, "Expand RenderQueue ring buffer for >1MB 0.3.DL VBOs");
+	REG_HOOK(Boot, CRenderer_SetupEntityVisibility, CRenderer_SetupEntityVisibility, "Give OOB SA-MP CObjects single-owner rendering");
+	REG_HOOK(Boot, CMirrors_RenderReflections, CMirrors_RenderReflections, "Skip unused vehicle env-map & guard OOB reflection redraw");
 	REG_HOOK(Boot, CDraw_CalculateAspectRatio, CDraw_CalculateAspectRatio, "Custom aspect ratio override");
 	REG_HOOK(Boot, CObject_Render, CObject_Render, "Object custom material/text & UVAnim");
 	REG_HOOK(Boot, CRenderer_RenderEverythingBarRoads, CRenderer_RenderEverythingBarRoads, "Force-render OOB objects");

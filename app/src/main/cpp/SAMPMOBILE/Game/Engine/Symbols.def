@@ -622,3 +622,25 @@ SYM_FN(CCollision_BuildCacheOfCameraCollision, "_ZN10CCollision27BuildCacheOfCam
 SYM_FN(CCollision_CheckCameraCollisionObjects, "_ZN10CCollision27CheckCameraCollisionObjectsEiiP7CColBoxP10CColSphereS3_S3_", bool, Required)
 SYM_DATA(CCollision_bCamCollideWithObjects, "_ZN10CCollision22bCamCollideWithObjectsE", uint8_t, Required)
 SYM_FN(RenderQueue_Ctor, "_ZN11RenderQueueC2Ev", void*, Required)
+
+// Reflection-pass guard & single-owner OOB visibility
+SYM_DATA(CMirrors_bRenderingReflection, "_ZN8CMirrors20bRenderingReflectionE", uint8_t, Required)
+SYM_DATA(CMirrors_TypeOfMirror, "_ZN8CMirrors12TypeOfMirrorE", int32_t, Required)
+SYM_FN(CMirrors_RenderReflections, "_ZN8CMirrors17RenderReflectionsEv", void, Required)
+SYM_FN(CRenderer_SetupEntityVisibility, "_ZN9CRenderer21SetupEntityVisibilityEP7CEntityRf", int32_t, Required)
+
+// Collision plane-cache expansion & TFaceGroup-accelerated raycasts
+SYM_DATA(CCollision_ms_colModelCache, "_ZN10CCollision16ms_colModelCacheE", void, Required)
+SYM_FN(CCollision_Init, "_ZN10CCollision4InitEv", void, Required)
+SYM_FN(CCollision_ProcessColModels, "_ZN10CCollision16ProcessColModelsERK7CMatrixR9CColModelS2_S4_P9CColPointS6_Pfb", int32_t, Required)
+SYM_FN(CCollision_ProcessVerticalLine, "_ZN10CCollision19ProcessVerticalLineERK8CColLineRK7CMatrixR9CColModelR9CColPointRfbbP15CStoredCollPoly", bool, Required)
+SYM_FN(CCollision_ProcessLineOfSight, "_ZN10CCollision18ProcessLineOfSightERK8CColLineRK7CMatrixR9CColModelR9CColPointRfbb", bool, Required)
+SYM_FN(CCollision_TestLineBox_DW, "_ZN10CCollision14TestLineBox_DWERK8CColLineRK4CBox", bool, Required)
+SYM_FN(CCollision_ProcessLineSphere, "_ZN10CCollision17ProcessLineSphereERK8CColLineRK10CColSphereR9CColPointRf", bool, Required)
+SYM_FN(CCollision_ProcessLineBox, "_ZN10CCollision14ProcessLineBoxERK8CColLineRK7CColBoxR9CColPointRf", bool, Required)
+SYM_FN(CCollision_ProcessLineTriangle, "_ZN10CCollision19ProcessLineTriangleERK8CColLinePK7CVectorRK12CColTriangleRK17CColTrianglePlaneR9CColPointRfP15CStoredCollPoly", bool, Required)
+SYM_FN(CCollision_CalculateTrianglePlanes, "_ZN10CCollision23CalculateTrianglePlanesEP14CCollisionData", void, Required)
+SYM_FN(SurfaceInfos_IsSeeThrough, "_ZN14SurfaceInfos_c12IsSeeThroughEj", bool, Required)
+SYM_FN(SurfaceInfos_IsShootThrough, "_ZN14SurfaceInfos_c14IsShootThroughEj", bool, Required)
+SYM_DATA(CCollision_ms_iProcessLineNumCrossings, "_ZN10CCollision27ms_iProcessLineNumCrossingsE", int32_t, Required)
+SYM_DATA(g_surfaceInfos, "g_surfaceInfos", void, Required)

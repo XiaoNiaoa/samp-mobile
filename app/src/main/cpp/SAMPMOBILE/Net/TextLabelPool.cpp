@@ -13,7 +13,7 @@
 #include "../UI/UISettings.h"
 #include "../UI/ImGuiRenderer.h"
 #include <encoding.h>
-#include <sstream>
+#include <cstring>
 
 
 CTextLabelPool::CTextLabelPool()
@@ -30,6 +30,8 @@ CTextLabelPool::CTextLabelPool()
 		m_TextLabels[i].vehicleId = 0;
 
 		m_bSlotUsed[i] = false;
+		m_dwLastLosTick[i] = 0;
+		m_bLastLosVisible[i] = true;
 	}
 }
 
@@ -82,6 +84,8 @@ void CTextLabelPool::NewLabel(uint16_t wLabelId, TEXT_LABEL* pLabel)
 		}
 
 		m_bSlotUsed[wLabelId] = true;
+		m_dwLastLosTick[wLabelId] = 0;
+		m_bLastLosVisible[wLabelId] = true;
 	}
 }
 
@@ -104,6 +108,8 @@ void CTextLabelPool::ClearLabel(uint16_t wLabelId)
 		label->vehicleId = 0;
 
 		m_bSlotUsed[wLabelId] = false;
+		m_dwLastLosTick[wLabelId] = 0;
+		m_bLastLosVisible[wLabelId] = true;
 	}
 }
 
@@ -119,6 +125,9 @@ void CTextLabelPool::Render(ImGuiRenderer* renderer)
 
 	CPlayerPool* pPlayerPool = pNetGame->GetPlayerPool();
 	CVehiclePool* pVehiclePool = pNetGame->GetVehiclePool();
+	const float screenW = pUI ? pUI->size().x : 1920.0f;
+	const float screenH = pUI ? pUI->size().y : 1080.0f;
+	const uint32_t nowTick = GetTickCount();
 
 	for (int i = 0; i < MAX_TEXT_LABELS; i++) {
 		if (!m_bSlotUsed[i]) {
@@ -169,69 +178,72 @@ void CTextLabelPool::Render(ImGuiRenderer* renderer)
 
 		pTextLabel->vecPos = textPos;
 
-		// Distance culling before the line-of-sight raycast
+		// Distance culling before screen projection & line-of-sight raycast
 		if (pLocalPed->GetDistanceFromPoint(textPos) > pTextLabel->fDistance) {
 			continue;
 		}
 
+		// Frustum/screen cull before expensive 3D get_line_of_sight raycast (matches PlayerTags.cpp)
+		const float marginX = (screenW * 0.25f > 300.0f) ? (screenW * 0.25f) : 300.0f;
+		const float marginY = (screenH * 0.25f > 200.0f) ? (screenH * 0.25f) : 200.0f;
+		RwV3d vProbe = textPos;
+		RwV3d vScreen{};
+		CalcScreenCoors(&vProbe, &vScreen, 0.0f, 0.0f, false, false);
+		if (vScreen.z < 1.0f
+				|| vScreen.x < -marginX || vScreen.x > screenW + marginX
+				|| vScreen.y < -marginY || vScreen.y > screenH + marginY) {
+			continue;
+		}
+
 		if (pTextLabel->bTestLOS) {
-			CAMERA_AIM* pCam = GameGetInternalAim();
-			if (pCam) {
-				int hitEntity = ScriptCommand(&get_line_of_sight,
-						textPos.x, textPos.y, textPos.z,
-						pCam->pos1x, pCam->pos1y, pCam->pos1z,
-						1, 0, 0, 1, 0);
-				if (!hitEntity) {
-					continue;
+			const uint32_t staggerMs = static_cast<uint32_t>(i & 3) * 25u;
+			if (m_dwLastLosTick[i] == 0 || (nowTick - m_dwLastLosTick[i]) >= (100u + staggerMs)) {
+				CAMERA_AIM* pCam = GameGetInternalAim();
+				if (pCam) {
+					int hitEntity = ScriptCommand(&get_line_of_sight,
+							textPos.x, textPos.y, textPos.z,
+							pCam->pos1x, pCam->pos1y, pCam->pos1z,
+							1, 0, 0, 1, 0);
+					m_bLastLosVisible[i] = (hitEntity != 0);
+					m_dwLastLosTick[i] = nowTick ? nowTick : 1u;
 				}
+			}
+			if (!m_bLastLosVisible[i]) {
+				continue;
 			}
 		}
 
-		Draw(renderer, textPos, pTextLabel->text, pTextLabel->dwColor);
+		Draw(renderer, vScreen.x, vScreen.y, pTextLabel->text, pTextLabel->dwColor);
 	}
 }
 
 /**
  * @param renderer
- * @param vecPos
+ * @param screenX
+ * @param screenY
  * @param text
  * @param dwColor
  */
-void CTextLabelPool::Draw(ImGuiRenderer* renderer, sa::CVector vecPos, const char* text, uint32_t dwColor)
+void CTextLabelPool::Draw(ImGuiRenderer* renderer, float screenX, float screenY, const char* text, uint32_t dwColor)
 {
 	const uint8_t alpha = static_cast<uint8_t>(dwColor & 0xFF);
-	if (alpha == 0) return;
-
-	RwV3d vPos = vecPos;
-	RwV3d vecOut;
-
-	CalcScreenCoors(&vPos, &vecOut, 0.0f, 0.0f, false, false);
-	if (vecOut.z < 1.0f) return;
+	if (alpha == 0 || !text || !text[0]) return;
 
 	const float labelFontSize = (UISettings::fontSize() / 2.0f) * Settings::textlabelScale();
-	const uint32_t abgr = __builtin_bswap32(dwColor);
+	ImColor curColor(__builtin_bswap32(dwColor));
 	const bool bOutline = (alpha == 0xFF);
-	std::stringstream ss_data(text);
-	std::string s_row;
-	std::string carryColor;
-	while (std::getline(ss_data, s_row, '\n')) {
-		if (!carryColor.empty()) {
-			s_row = carryColor + s_row;
+
+	float curY = screenY;
+	const char* lineStart = text;
+	while (true) {
+		const char* nl = std::strchr(lineStart, '\n');
+		const char* lineEnd = nl ? nl : (lineStart + std::strlen(lineStart));
+		if (lineEnd > lineStart) {
+			ImVec2 sz = renderer->calculateTextSizeRange(lineStart, lineEnd, labelFontSize);
+			renderer->drawTextRange(ImVec2(screenX - (sz.x * 0.5f), curY), curColor, lineStart, lineEnd, bOutline, labelFontSize, nullptr, &curColor);
 		}
-		for (size_t i = 0; i + 7 < s_row.size(); ++i) {
-			if (s_row[i] == '{' && s_row[i + 7] == '}') {
-				bool hex = true;
-				for (size_t k = 1; k <= 6; ++k) {
-					if (!std::isxdigit(static_cast<unsigned char>(s_row[i + k]))) { hex = false; break; }
-				}
-				if (hex) {
-					carryColor = s_row.substr(i, 8);
-					i += 7;
-				}
-			}
-		}
-		ImVec2 sz = renderer->calculateTextSize(s_row, labelFontSize);
-		renderer->drawText(ImVec2(vecOut.x - (sz.x / 2), vecOut.y), abgr, s_row, bOutline, labelFontSize);
-		vecOut.y += labelFontSize;
+		curY += labelFontSize;
+		if (!nl) break;
+		lineStart = nl + 1;
 	}
 }

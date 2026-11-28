@@ -20,12 +20,14 @@ public:
 	void drawTriangle(const ImVec2& a, const ImVec2& b, const ImVec2& c, const ImColor& color, bool fill = false, float thickness = 1.0f);
 	void drawConvexPolyFilled(ImVec2* points, int num_points, const ImColor& color);
 	void drawText(const ImVec2& pos, const ImColor& color, const std::string& text, bool outlined = false, float font_size = 0.0f, ImFont* font = nullptr);
+	void drawTextRange(const ImVec2& pos, const ImColor& color, const char* begin, const char* end, bool outlined = false, float font_size = 0.0f, ImFont* font = nullptr, ImColor* outLastColor = nullptr);
 	void drawImage(const ImVec2& a, const ImVec2& b, ImTextureID texture);
 
 	void pushClipRect(const ImVec2& min, const ImVec2& max, bool intersect = false);
 	void popClipRect();
 
 	ImVec2 calculateTextSize(const std::string& text, float font_size = 0.0f);
+	ImVec2 calculateTextSizeRange(const char* begin, const char* end, float font_size = 0.0f);
 
 private:
 	ImVec2 calculateTextSize(const char* begin, const char* end, float font_size = 0.0f);

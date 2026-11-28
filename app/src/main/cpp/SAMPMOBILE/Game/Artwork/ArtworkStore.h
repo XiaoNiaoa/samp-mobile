@@ -85,6 +85,7 @@ private:
 		bool isPed = false;
 		sa::CBaseModelInfo* modelInfo = nullptr;
 		sa::CColModel* ownedCol = nullptr;
+		uint8_t* ownedFaceGroupBuf = nullptr;
 		size_t estimatedBytes = 0;
 		uint64_t lastUseSeq = 0;
 		uint32_t idleSinceMs = 0;
