@@ -29,6 +29,7 @@ libraries, prebuilt binaries, and fonts used by **SA-MP Mobile**.
 | **LLVM `libc++_shared.so`** | `app/src/main/jniLibs/*/libc++_shared.so` | [Apache-2.0 WITH LLVM-exception](LLVM-Apache-2.0-Exception.txt) | https://llvm.org/ |
 | **Roboto Fonts** | `app/src/main/res/font/roboto*.ttf` | [Apache-2.0](Apache-2.0.txt) | https://github.com/googlefonts/roboto-2 |
 | **Montserrat Font (Downloadable Font XML)** | `app/src/main/res/font/montserrat*.xml` | SIL OFL 1.1 | https://fonts.google.com/specimen/Montserrat |
+| **IP Location DB (`geo-whois-asn-country`, `ipv4_country.bin`)** | `app/src/main/res/raw/ipv4_country.bin` | CC0-1.0 (Public Domain) | https://github.com/sapics/ip-location-db |
 | **AndroidX / Material / OkHttp / Glide / JUnit** | Resolved via Gradle (`gradle/libs.versions.toml`) | Apache-2.0 / BSD / EPL-1.0 | Maven Central / Google Maven |
 
 ## Non-Commercial / Proprietary Third-Party Components

@@ -82,9 +82,18 @@
 
     <!-- launcher redesign -->
     <string name="tab_favorites">收藏夹</string>
+    <string name="tab_regional">国服</string>
     <string name="tab_internet">互联网</string>
     <string name="tab_partners">合作方</string>
     <string name="tab_recent">最近加入</string>
+    <string name="filter_all_languages">全部</string>
+    <string name="filter_multi_select">多选</string>
+    <string name="filter_multi_select_count">多选 (%1$d)</string>
+    <string name="filter_country_dialog_title">选择国家/地区（支持多选）</string>
+    <string name="filter_language_dialog_title">按语言筛选服务器（支持多选）</string>
+    <string name="filter_auto_detect">自动识别 (%1$s)</string>
+    <string name="filter_confirm">确定</string>
+    <string name="servers_empty_regional">当前所选国家/地区暂无在线服务器\n可在上方切换其他国家，或点右上角刷新</string>
     <string name="join_server">进入服务器</string>
     <string name="delete_server">删除服务器</string>
     <string name="player_nickname">玩家昵称</string>

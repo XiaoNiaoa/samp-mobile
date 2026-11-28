@@ -69,6 +69,8 @@ third_party/licenses/THIRD_PARTY_NOTICES.md:
   * OpenAL Soft (libOpenAL*.so) — LGPL-2.0+
   * LLVM libc++_shared (libc++_shared.so) — Apache-2.0 WITH LLVM-exception
   * Roboto Fonts — Apache-2.0
+  * IPv4-to-Country dataset (res/raw/ipv4_country.bin, derived from
+    @ip-location-db/geo-whois-asn-country) — CC0-1.0 (Public Domain)
   * BASS audio library (libBASS*.so) — Un4seen Developments
     (free for non-commercial use; commercial use requires a separate license)
   * Java runtime glue classes under com/rockstargames, com/wardrumstudios,

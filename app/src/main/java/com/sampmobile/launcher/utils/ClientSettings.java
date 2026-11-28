@@ -190,6 +190,8 @@ public final class ClientSettings {
         Map<String, Object> d = new LinkedHashMap<>();
         d.put("offline_mode", false);
         d.put("app_language", LocaleManager.LANG_AUTO);
+        d.put("regional_countries", "auto");
+        d.put("internet_languages", "");
         d.put("nick_name", "samp_player");
         d.put("samp_version", SAMP_VER_037);
         d.put("system_keyboard", true);
