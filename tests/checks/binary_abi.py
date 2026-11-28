@@ -440,6 +440,80 @@ def _check_compiled_binaries_and_jni(
             else:
                 r.fail(f"Compiled JNI exports [{abi}]", "; ".join(missing_jni))
 
+        # 3) Android 16+ (SDK >= 36) GlossHook LinkerInit neutralization guard:
+        # libGlossHook.a's LinkerInit() (_Z10LinkerInitv) hardcodes api <= 35 and hooks
+        # Bionic's do_dlopen, causing an instant SIGSEGV on Android 16+. Verify on both
+        # ABIs that libSAMPMOBILE.so wraps _Z10LinkerInitv so zero dynamic relocations or
+        # GlossInit instructions target the unwrapped LinkerInit().
+        objdump_bin = find_ndk_tool("llvm-objdump")
+        linker_wrap_errors: List[str] = []
+        linker_wrap_checked = 0
+        for abi in ("arm64-v8a", "armeabi-v7a"):
+            samp_so = compiled[abi].get("libSAMPMOBILE.so")
+            if not samp_so:
+                continue
+            linker_wrap_checked += 1
+            rel_out = subprocess.check_output(
+                [str(readelf_bin), "-rW", str(samp_so)],
+                text=True,
+                errors="ignore",
+            )
+            if "_Z10LinkerInitv" in rel_out:
+                linker_wrap_errors.append(f"{abi}: _Z10LinkerInitv still present in dynamic relocations")
+                continue
+
+            if objdump_bin:
+                dynsym_out = subprocess.check_output(
+                    [str(readelf_bin), "--dyn-syms", "-W", str(samp_so)],
+                    text=True,
+                    errors="ignore",
+                )
+                gloss_init_range: Optional[Tuple[int, int]] = None
+                linker_init_addr: Optional[int] = None
+                for ln in dynsym_out.splitlines():
+                    parts = ln.split()
+                    if len(parts) < 8:
+                        continue
+                    sym_name = parts[7].split("@", 1)[0]
+                    if sym_name not in ("GlossInit", "_Z10LinkerInitv"):
+                        continue
+                    try:
+                        val = int(parts[1], 16) & ~1
+                        sz = int(parts[2], 16) if parts[2].startswith("0x") else int(parts[2])
+                    except ValueError:
+                        continue
+                    if sym_name == "GlossInit" and sz > 0:
+                        gloss_init_range = (val, val + sz)
+                    elif sym_name == "_Z10LinkerInitv" and val > 0:
+                        linker_init_addr = val
+
+                if not gloss_init_range:
+                    linker_wrap_errors.append(f"{abi}: GlossInit missing from .dynsym")
+                else:
+                    dis_out = subprocess.check_output(
+                        [
+                            str(objdump_bin),
+                            "-d",
+                            f"--start-address=0x{gloss_init_range[0]:x}",
+                            f"--stop-address=0x{gloss_init_range[1]:x}",
+                            str(samp_so),
+                        ],
+                        text=True,
+                        errors="ignore",
+                    )
+                    if "_Z10LinkerInitv" in dis_out and "__wrap__Z10LinkerInitv" not in dis_out:
+                        linker_wrap_errors.append(f"{abi}: GlossInit still branches to _Z10LinkerInitv")
+                    elif linker_init_addr and f"0x{linker_init_addr:x}" in dis_out:
+                        linker_wrap_errors.append(f"{abi}: GlossInit directly calls 0x{linker_init_addr:x} (_Z10LinkerInitv)")
+
+        if linker_wrap_errors:
+            r.fail("Android 16+ GlossHook LinkerInit wrap guard", "; ".join(linker_wrap_errors))
+        elif linker_wrap_checked:
+            r.ok(
+                "Android 16+ GlossHook LinkerInit wrap guard",
+                f"{linker_wrap_checked} ABIs verified (_Z10LinkerInitv unreferenced by GlossInit / PLT)",
+            )
+
 
 def _check_got_relocations(r: Runner, readelf_bin: Optional[Path], require_gtasa: bool) -> None:
     """Verify Addr.h hardcoded GOT redirection offsets match real ELF GLOB_DAT relocations on both ABIs."""
