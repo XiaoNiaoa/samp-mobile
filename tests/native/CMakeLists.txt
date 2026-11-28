@@ -45,6 +45,14 @@ add_library(artwork_core STATIC
 target_include_directories(artwork_core PUBLIC "${CLIENT}")
 add_native_test(artwork_core       core/test_artwork_core.cpp       artwork_core)
 
+add_subdirectory("${CLIENT}/Deps/7zip" "${CMAKE_CURRENT_BINARY_DIR}/deps_7zip")
+add_subdirectory("${CLIENT}/Deps/Unrar" "${CMAKE_CURRENT_BINARY_DIR}/deps_unrar")
+add_library(archive_extractor STATIC
+        "${CLIENT}/Archive/ArchiveExtractor.cpp")
+target_include_directories(archive_extractor PUBLIC "${CLIENT}")
+target_link_libraries(archive_extractor PUBLIC dec7z decunrar)
+add_native_test(archive_extractor  core/test_archive_extractor.cpp  archive_extractor artwork_core)
+
 # ---- Protocol & netcap format tests ----
 add_native_test(bitstream          proto/test_bitstream.cpp         rakbits)
 add_native_test(netcap             proto/test_netcap.cpp)

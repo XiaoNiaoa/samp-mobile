@@ -384,8 +384,8 @@
     <string name="ui_settings_panel_multiplayer_017">Skip launcher original file integrity check to avoid manually replaced data files from being restored</string>
     <string name="ui_settings_panel_multiplayer_018">0.3.DL custom model cache</string>
     <string name="ui_settings_panel_multiplayer_019">Counting SAMP/cache/ directory...</string>
-    <string name="ui_settings_panel_multiplayer_020">Import PC 0.3.DL cache .zip archives, extracted folders, or 0x*.dff / 0x*.txd files (nested folders are normalized into shared local/ cache)</string>
-    <string name="ui_settings_panel_multiplayer_021">Import .zip/File</string>
+    <string name="ui_settings_panel_multiplayer_020">Directly import PC 0.3.DL cache .zip / .7z / .rar archives, extracted folders, or 0x*.dff / 0x*.txd files (nested folders auto-normalize into shared local/ cache)</string>
+    <string name="ui_settings_panel_multiplayer_021">Import Archive/File</string>
     <string name="ui_settings_panel_multiplayer_022">Clear all</string>
     <string name="ui_settings_panel_multiplayer_023">There are no cached server custom models yet</string>
     <string name="ui_settings_panel_multiplayer_024">Launcher appearance &amp; theme</string>

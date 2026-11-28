@@ -82,7 +82,14 @@ final class SettingsArtworkCacheController {
 
     private void launchFilePicker() {
         try {
-            host.artworkCachePicker.launch(new String[]{"application/zip", "application/octet-stream", "*/*"});
+            host.artworkCachePicker.launch(new String[]{
+                    "application/zip",
+                    "application/x-7z-compressed",
+                    "application/vnd.rar",
+                    "application/x-rar-compressed",
+                    "application/octet-stream",
+                    "*/*"
+            });
         } catch (Throwable t) {
             if (host.isAdded()) {
                 Toast.makeText(host.requireContext(),
@@ -344,20 +351,23 @@ final class SettingsArtworkCacheController {
                     if (res.cancelled) {
                         Toast.makeText(act, String.format(Locale.US,
                                 I18n.tr("已取消导入（已写入 %,d 个文件）"), res.importedFiles), Toast.LENGTH_LONG).show();
-                    } else if (res.importedFiles == 0 && res.unsupportedArchiveFormat != null) {
+                    } else if (res.importedFiles == 0 && res.passwordRequired) {
                         new AlertDialog.Builder(act)
-                                .setTitle(String.format(Locale.US,
-                                        I18n.tr("暂不支持直接读取 %s 压缩包"), res.unsupportedArchiveFormat))
-                                .setMessage(String.format(Locale.US,
-                                        I18n.tr("检测到您选择了 %s 格式压缩包，系统原生仅支持直接读取 .zip 格式。\n\n请先用手机文件管理器（如 MT管理器 / ZArchiver）将其解压到任意文件夹，再点击下方「导入文件夹」自动扫描导入，或重新打包为 .zip 后导入。"),
-                                        res.unsupportedArchiveFormat))
+                                .setTitle(I18n.tr("压缩包设有密码保护"))
+                                .setMessage(I18n.tr("检测到该压缩包需要解压密码。请先用手机文件管理器（如 MT管理器 / ZArchiver）输入密码将其解压到任意目录，再点击下方「导入文件夹」一键导入。"))
                                 .setNegativeButton(I18n.tr("知道了"), null)
                                 .setPositiveButton(I18n.tr("导入文件夹"), (d, w) -> launchFolderPicker())
+                                .show();
+                    } else if (res.importedFiles == 0 && res.archiveError != null && !res.archiveError.isEmpty()) {
+                        new AlertDialog.Builder(act)
+                                .setTitle(I18n.tr("导入失败"))
+                                .setMessage(I18n.tr(res.archiveError))
+                                .setPositiveButton(I18n.tr("知道了"), null)
                                 .show();
                     } else if (res.importedFiles == 0) {
                         new AlertDialog.Builder(act)
                                 .setTitle(I18n.tr("未找到有效的 0.3.DL 缓存文件"))
-                                .setMessage(I18n.tr("所选文件/文件夹中未检测到 0x<CRC>.dff 或 0x<CRC>.txd 格式的服务器模型缓存文件。\n\n若压缩包为 .7z / .rar 格式，请先解压后点击「导入文件夹」；普通单机/Modloader 模型请前往「模组」板块导入。"))
+                                .setMessage(I18n.tr("所选压缩包或文件夹中未检测到 0x<CRC>.dff 或 0x<CRC>.txd 格式的服务器模型缓存文件（普通单机/Modloader 模型请前往「模组」板块导入）。"))
                                 .setPositiveButton(I18n.tr("知道了"), null)
                                 .show();
                     } else {

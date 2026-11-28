@@ -391,8 +391,8 @@
     <string name="ui_settings_panel_multiplayer_017">跳过启动器原始文件完整性检查，避免手工替换的数据文件被还原</string>
     <string name="ui_settings_panel_multiplayer_018">0.3.DL 自定义模型缓存</string>
     <string name="ui_settings_panel_multiplayer_019">正在统计 SAMP/cache/ 目录…</string>
-    <string name="ui_settings_panel_multiplayer_020">支持导入 PC 端 0.3.DL 缓存 .zip 包、已解压文件夹或散装 0x*.dff / 0x*.txd（自动识别多层目录并归入 local/ 全服通用）</string>
-    <string name="ui_settings_panel_multiplayer_021">导入文件/.zip</string>
+    <string name="ui_settings_panel_multiplayer_020">支持直接导入 PC 端 0.3.DL 缓存 .zip / .7z / .rar 压缩包、已解压文件夹或散装 0x*.dff / 0x*.txd（自动识别多层目录并归入 local/ 全服通用）</string>
+    <string name="ui_settings_panel_multiplayer_021">导入压缩包/文件</string>
     <string name="ui_settings_panel_multiplayer_022">清空全部</string>
     <string name="ui_settings_panel_multiplayer_023">暂无已缓存的服务器自定义模型</string>
     <string name="ui_settings_panel_multiplayer_024">启动器外观与主题</string>

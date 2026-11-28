@@ -26,15 +26,16 @@ import java.util.zip.ZipInputStream;
 
 /**
  * Manages the SA-MP 0.3.DL / open.mp custom model disk cache under {@code files/SAMP/cache/}.
- * Supports scanning per-server & shared {@code local/} cache directories, importing PC 0.3.DL
- * cache {@code .zip} archives (with arbitrary nested folder hierarchies, nested {@code .zip}s,
- * and Windows GBK/UTF-8 paths), recursive SAF directories, or individual {@code 0x*.dff} /
- * {@code 0x*.txd} cache files, and deleting individual cache folders or clearing all caches.
+ * Supports scanning per-server & shared {@code local/} cache directories, directly importing
+ * PC 0.3.DL cache {@code .zip}, {@code .7z}, and {@code .rar} (RAR4/RAR5) archives (with arbitrary
+ * nested folder hierarchies, nested archives, and Windows GBK/UTF-8/UTF-16 paths), recursive SAF
+ * directories, or individual {@code 0x*.dff} / {@code 0x*.txd} cache files, and deleting cache folders.
  */
 public final class ArtworkCacheManager {
 
     private static final int IO_BUFFER_SIZE = 64 * 1024;
     private static final long MAX_SINGLE_FILE_BYTES = 64L * 1024L * 1024L;
+    private static final long MAX_STAGED_ARCHIVE_BYTES = 4L * 1024L * 1024L * 1024L;
     private static final int MAX_FOLDER_NAME_LEN = 96;
     private static final int MAX_ZIP_NESTING = 3;
     private static final int MAX_SCAN_DEPTH = 4;
@@ -78,19 +79,21 @@ public final class ArtworkCacheManager {
         public final int skippedFiles;
         public final long importedBytes;
         public final boolean cancelled;
-        public final String unsupportedArchiveFormat;
+        public final boolean passwordRequired;
+        public final String archiveError;
 
         public ImportResult(int importedFiles, int skippedFiles, long importedBytes, boolean cancelled) {
-            this(importedFiles, skippedFiles, importedBytes, cancelled, null);
+            this(importedFiles, skippedFiles, importedBytes, cancelled, false, null);
         }
 
         public ImportResult(int importedFiles, int skippedFiles, long importedBytes, boolean cancelled,
-                            String unsupportedArchiveFormat) {
+                            boolean passwordRequired, String archiveError) {
             this.importedFiles = importedFiles;
             this.skippedFiles = skippedFiles;
             this.importedBytes = importedBytes;
             this.cancelled = cancelled;
-            this.unsupportedArchiveFormat = unsupportedArchiveFormat;
+            this.passwordRequired = passwordRequired;
+            this.archiveError = archiveError;
         }
     }
 
@@ -188,7 +191,7 @@ public final class ArtworkCacheManager {
     /**
      * Resolves any archive/relative entry path to a unified relative destination under
      * {@code SAMP/cache/local/0x<CRC>.dff|txd} regardless of wrapper folder depth or PC server
-     * directory name (IP vs domain, port, hyphen stripping, Chinese wrapper directories, etc.).
+     * directory name (IP vs domain, port, colon {@code <ip:port>}, hyphen stripping, Chinese wrapper dirs).
      * Returns {@code null} if the entry is not a valid {@code 0x<CRC>.dff|txd} file or fails
      * Zip-Slip traversal checks.
      */
@@ -222,7 +225,7 @@ public final class ArtworkCacheManager {
         if (cacheRoot == null || !cacheRoot.isDirectory()) {
             return new CacheSummary(0, 0L, Collections.emptyList());
         }
-        // Migrate any loose 0x<CRC>.dff|txd dropped directly into SAMP/cache/ root into local/
+        cleanupStagedTempFiles(cacheRoot);
         migrateLooseRootCacheFiles(cacheRoot);
 
         File[] children = cacheRoot.listFiles();
@@ -259,6 +262,17 @@ public final class ArtworkCacheManager {
         return new CacheSummary(totalFiles, totalBytes, folders);
     }
 
+    private static void cleanupStagedTempFiles(File cacheRoot) {
+        File[] children = cacheRoot.listFiles();
+        if (children == null) return;
+        for (File f : children) {
+            if (f.isFile() && f.getName().startsWith(".stage_import_") && f.getName().endsWith(".tmp")) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
+    }
+
     private static void migrateLooseRootCacheFiles(File cacheRoot) {
         File[] children = cacheRoot.listFiles();
         if (children == null) return;
@@ -277,7 +291,6 @@ public final class ArtworkCacheManager {
             if (dst.exists()) {
                 dst.delete();
             }
-            // Best-effort atomic move on same filesystem
             //noinspection ResultOfMethodCallIgnored
             child.renameTo(dst);
         }
@@ -345,14 +358,13 @@ public final class ArtworkCacheManager {
     }
 
     /**
-     * Imports one or more local {@link File}s (archives, loose {@code 0x<CRC>.dff|txd} files,
-     * or nested directories) into {@code cacheRoot/local/}. Shared directly between runtime logic
-     * and host JVM unit tests.
+     * Imports one or more local {@link File}s ({@code .zip}/{@code .7z}/{@code .rar} archives,
+     * loose {@code 0x<CRC>.dff|txd} files, or nested directories) into {@code cacheRoot/local/}.
      */
     public static ImportResult importFromFiles(List<File> sources, File cacheRoot,
                                                ProgressListener listener, AtomicBoolean cancelled) throws IOException {
         if (sources == null || sources.isEmpty() || cacheRoot == null) {
-            return new ImportResult(0, 0, 0L, false, null);
+            return new ImportResult(0, 0, 0L, false, false, null);
         }
         if (!cacheRoot.exists()) {
             cacheRoot.mkdirs();
@@ -371,12 +383,31 @@ public final class ArtworkCacheManager {
             if (src.isDirectory()) {
                 importLocalDirectory(src, MAX_TREE_DEPTH, session);
             } else if (src.isFile()) {
-                try (InputStream raw = new FileInputStream(src)) {
-                    importSingleStream(raw, src.getName(), session);
-                }
+                importLocalFile(src, session);
             }
         }
         return session.toResult();
+    }
+
+    private static void importLocalFile(File src, ImportSession session) throws IOException {
+        try (BufferedInputStream bis = new BufferedInputStream(new FileInputStream(src), IO_BUFFER_SIZE)) {
+            int kind = sniffStreamKind(bis, src.getName());
+            if (kind == STREAM_7Z || kind == STREAM_RAR) {
+                // Direct random-access extraction on the local File without copying!
+                importNativeArchiveFile(src, session);
+                return;
+            }
+            if (kind == STREAM_ZIP) {
+                importZipStream(bis, 1, session);
+                return;
+            }
+            String canonical = normalizeCacheFileName(src.getName());
+            if (canonical == null) {
+                session.skipped++;
+                return;
+            }
+            writeCanonicalLocalFile(bis, canonical, session);
+        }
     }
 
     private static void importLocalDirectory(File dir, int depthLeft, ImportSession session) throws IOException {
@@ -396,15 +427,9 @@ public final class ArtworkCacheManager {
                     try (InputStream in = new FileInputStream(child)) {
                         writeCanonicalLocalFile(in, canonical, session);
                     }
-                } else if (hasZipExtension(name)) {
-                    try (InputStream in = new FileInputStream(child)) {
-                        importSingleStream(in, name, session);
-                    }
+                } else if (isSupportedArchiveExtension(name)) {
+                    importLocalFile(child, session);
                 } else {
-                    String unsup = detectUnsupportedArchiveExtension(name);
-                    if (unsup != null && session.unsupportedFormat == null) {
-                        session.unsupportedFormat = unsup;
-                    }
                     session.skipped++;
                 }
             }
@@ -414,7 +439,7 @@ public final class ArtworkCacheManager {
     public static ImportResult importFromUris(Context context, List<Uri> uris, File cacheRoot,
                                               ProgressListener listener, AtomicBoolean cancelled) throws IOException {
         if (context == null || uris == null || uris.isEmpty() || cacheRoot == null) {
-            return new ImportResult(0, 0, 0L, false, null);
+            return new ImportResult(0, 0, 0L, false, false, null);
         }
         if (!cacheRoot.exists()) {
             cacheRoot.mkdirs();
@@ -442,13 +467,13 @@ public final class ArtworkCacheManager {
 
     /**
      * Recursively imports a user-selected SAF directory ({@code OpenDocumentTree}) at arbitrary
-     * subfolder depth, normalizing all {@code 0x<CRC>.dff|txd} files (and any inner {@code .zip}
-     * archives) into {@code SAMP/cache/local/}.
+     * subfolder depth, normalizing all {@code 0x<CRC>.dff|txd} files (and any inner {@code .zip},
+     * {@code .7z}, or {@code .rar} archives) into {@code SAMP/cache/local/}.
      */
     public static ImportResult importFromTreeUri(Context context, Uri treeUri, File cacheRoot,
                                                  ProgressListener listener, AtomicBoolean cancelled) throws IOException {
         if (context == null || treeUri == null || cacheRoot == null) {
-            return new ImportResult(0, 0, 0L, false, null);
+            return new ImportResult(0, 0, 0L, false, false, null);
         }
         if (!cacheRoot.exists()) {
             cacheRoot.mkdirs();
@@ -469,7 +494,7 @@ public final class ArtworkCacheManager {
         if (session.isCancelled()) return;
         Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId);
         List<String> subDirs = new ArrayList<>();
-        List<String[]> candidateFiles = new ArrayList<>(); // [docId, displayName]
+        List<String[]> candidateFiles = new ArrayList<>();
 
         try (Cursor c = resolver.query(childrenUri, new String[]{
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -510,7 +535,7 @@ public final class ArtworkCacheManager {
                         writeCanonicalLocalFile(in, canonical, session);
                     }
                 }
-            } else if (hasZipExtension(name)) {
+            } else if (isSupportedArchiveExtension(name)) {
                 Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
                 try (InputStream in = resolver.openInputStream(fileUri)) {
                     if (in == null) {
@@ -520,10 +545,6 @@ public final class ArtworkCacheManager {
                     }
                 }
             } else {
-                String unsup = detectUnsupportedArchiveExtension(name);
-                if (unsup != null && session.unsupportedFormat == null) {
-                    session.unsupportedFormat = unsup;
-                }
                 session.skipped++;
             }
         }
@@ -540,14 +561,8 @@ public final class ArtworkCacheManager {
                 : new BufferedInputStream(raw, IO_BUFFER_SIZE);
 
         int kind = sniffStreamKind(bis, displayName);
-        if (kind == STREAM_7Z) {
-            if (session.unsupportedFormat == null) session.unsupportedFormat = ".7z";
-            session.skipped++;
-            return;
-        }
-        if (kind == STREAM_RAR) {
-            if (session.unsupportedFormat == null) session.unsupportedFormat = ".rar";
-            session.skipped++;
+        if (kind == STREAM_7Z || kind == STREAM_RAR) {
+            stageAndImportNativeArchive(bis, session);
             return;
         }
         if (kind == STREAM_ZIP) {
@@ -561,6 +576,95 @@ public final class ArtworkCacheManager {
             return;
         }
         writeCanonicalLocalFile(bis, canonical, session);
+    }
+
+    private static void stageAndImportNativeArchive(InputStream in, ImportSession session) throws IOException {
+        File stageFile = new File(session.cacheRoot, ".stage_import_" + System.nanoTime() + ".tmp");
+        try {
+            if (session.listener != null) {
+                session.listener.onProgress(session.imported, session.skipped, I18n.tr("正在读取所选文件…"));
+            }
+            long copied = 0L;
+            try (FileOutputStream fos = new FileOutputStream(stageFile)) {
+                int n;
+                while ((n = in.read(session.buf)) != -1) {
+                    if (session.isCancelled()) {
+                        return;
+                    }
+                    copied += n;
+                    if (copied > MAX_STAGED_ARCHIVE_BYTES) {
+                        throw new IOException(I18n.tr("压缩包体积超出安全上限"));
+                    }
+                    fos.write(session.buf, 0, n);
+                }
+                fos.flush();
+            }
+            if (copied <= 0L) {
+                session.skipped++;
+                return;
+            }
+            importNativeArchiveFile(stageFile, session);
+        } finally {
+            if (stageFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                stageFile.delete();
+            }
+        }
+    }
+
+    private static void importNativeArchiveFile(File archiveFile, ImportSession session) throws IOException {
+        File localDir = new File(session.cacheRoot, "local");
+        if (!localDir.exists()) {
+            localDir.mkdirs();
+        }
+        final int baseImported = session.imported;
+        final int baseSkipped = session.skipped;
+
+        NativeArchiveExtractor.Result res = NativeArchiveExtractor.extractCacheArchive(
+                archiveFile,
+                localDir,
+                (nativeImported, nativeSkipped, relPath) -> {
+                    if (session.isCancelled()) {
+                        return false;
+                    }
+                    if (session.listener != null && relPath != null && !relPath.isEmpty()) {
+                        session.listener.onProgress(
+                                baseImported + nativeImported,
+                                baseSkipped + nativeSkipped,
+                                relPath);
+                    }
+                    return !session.isCancelled();
+                });
+
+        session.imported += Math.max(0, res.importedFiles);
+        session.skipped += Math.max(0, res.skippedFiles);
+        session.bytes += Math.max(0L, res.importedBytes);
+
+        // Process any nested .zip files unpacked from inside .7z / .rar
+        for (String nestedZipPath : res.nestedZipPaths) {
+            File nestedZip = new File(nestedZipPath);
+            try {
+                if (!session.isCancelled() && nestedZip.isFile()) {
+                    try (InputStream zin = new BufferedInputStream(new FileInputStream(nestedZip), IO_BUFFER_SIZE)) {
+                        importZipStream(zin, 2, session);
+                    }
+                }
+            } finally {
+                if (nestedZip.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    nestedZip.delete();
+                }
+            }
+        }
+
+        if (res.status == NativeArchiveExtractor.STATUS_PASSWORD_REQUIRED) {
+            session.passwordRequired = true;
+            if (session.archiveError == null && !res.error.isEmpty()) {
+                session.archiveError = res.error;
+            }
+        } else if (res.status == NativeArchiveExtractor.STATUS_ERROR && session.archiveError == null && !res.error.isEmpty()) {
+            session.archiveError = res.error;
+        }
     }
 
     private static int sniffStreamKind(BufferedInputStream bis, String displayName) throws IOException {
@@ -593,17 +697,15 @@ public final class ArtworkCacheManager {
             return STREAM_RAR;
         }
 
-        String unsup = detectUnsupportedArchiveExtension(displayName);
-        if (".7z".equals(unsup)) return STREAM_7Z;
-        if (".rar".equals(unsup)) return STREAM_RAR;
-        if (read == 0 && hasZipExtension(displayName)) return STREAM_ZIP;
+        if (read == 0) {
+            if (has7zExtension(displayName)) return STREAM_7Z;
+            if (hasRarExtension(displayName)) return STREAM_RAR;
+            if (hasZipExtension(displayName)) return STREAM_ZIP;
+        }
         return STREAM_RAW;
     }
 
     private static ZipInputStream openTolerantZipStream(InputStream in) {
-        // Android API 24+ & JDK ZipInputStream automatically decode UTF-8 entries when GPBF bit 11
-        // is set, and use the supplied Charset (GBK) for legacy Windows non-UTF-8 entries so Chinese
-        // wrapper directories packed by WinRAR / Windows Explorer never throw MALFORMED.
         try {
             return new ZipInputStream(in, Charset.forName("GBK"));
         } catch (Throwable ignored) {
@@ -646,17 +748,18 @@ public final class ArtworkCacheManager {
                     continue;
                 }
 
-                // Support nested .zip inside .zip (e.g. "群文件离线包.zip" -> "cache.zip")
+                // Support nested .zip / .7z / .rar inside .zip
                 String leaf = extractSafeLeafName(entryName);
-                if (leaf != null && depth < MAX_ZIP_NESTING && hasZipExtension(leaf)) {
-                    importZipStream(new NonClosingInputStream(zis), depth + 1, session);
-                    zis.closeEntry();
-                    continue;
-                }
-                if (leaf != null) {
-                    String unsup = detectUnsupportedArchiveExtension(leaf);
-                    if (unsup != null && session.unsupportedFormat == null) {
-                        session.unsupportedFormat = unsup;
+                if (leaf != null && depth < MAX_ZIP_NESTING) {
+                    if (hasZipExtension(leaf)) {
+                        importZipStream(new NonClosingInputStream(zis), depth + 1, session);
+                        zis.closeEntry();
+                        continue;
+                    }
+                    if (has7zExtension(leaf) || hasRarExtension(leaf)) {
+                        stageAndImportNativeArchive(new NonClosingInputStream(zis), session);
+                        zis.closeEntry();
+                        continue;
                     }
                 }
                 session.skipped++;
@@ -684,18 +787,26 @@ public final class ArtworkCacheManager {
         }
     }
 
+    private static boolean isSupportedArchiveExtension(String name) {
+        return hasZipExtension(name) || has7zExtension(name) || hasRarExtension(name);
+    }
+
     private static boolean hasZipExtension(String name) {
         if (name == null) return false;
         String lower = stripDuplicateDownloadSuffixForArchive(name.trim().toLowerCase(Locale.US));
         return lower.endsWith(".zip");
     }
 
-    private static String detectUnsupportedArchiveExtension(String name) {
-        if (name == null) return null;
+    private static boolean has7zExtension(String name) {
+        if (name == null) return false;
         String lower = stripDuplicateDownloadSuffixForArchive(name.trim().toLowerCase(Locale.US));
-        if (lower.endsWith(".7z") || lower.contains(".7z.")) return ".7z";
-        if (lower.endsWith(".rar") || lower.contains(".part1.rar")) return ".rar";
-        return null;
+        return lower.endsWith(".7z");
+    }
+
+    private static boolean hasRarExtension(String name) {
+        if (name == null) return false;
+        String lower = stripDuplicateDownloadSuffixForArchive(name.trim().toLowerCase(Locale.US));
+        return lower.endsWith(".rar");
     }
 
     private static String stripDuplicateDownloadSuffixForArchive(String lowerName) {
@@ -728,7 +839,8 @@ public final class ArtworkCacheManager {
         int skipped = 0;
         long bytes = 0L;
         long lastNotifyMs = 0L;
-        String unsupportedFormat = null;
+        boolean passwordRequired = false;
+        String archiveError = null;
 
         ImportSession(File cacheRoot, String cacheRootCanon, ProgressListener listener, AtomicBoolean cancelled) {
             this.cacheRoot = cacheRoot;
@@ -752,7 +864,7 @@ public final class ArtworkCacheManager {
         }
 
         ImportResult toResult() {
-            return new ImportResult(imported, skipped, bytes, isCancelled(), unsupportedFormat);
+            return new ImportResult(imported, skipped, bytes, isCancelled(), passwordRequired, archiveError);
         }
     }
 
