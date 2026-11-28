@@ -442,6 +442,21 @@ RpAtomic* DriveUVAnimAtomicCB(RpAtomic* atomic, void* data);
  */
 void CObject::Process(float fElapsedTime)
 {
+	// Fast path for static, settled map objects (matching PC SA-MP object.cpp:440): avoids
+	// per-frame pool-handle lookup, vtable check, and double matrix reads across ~2,000 objects.
+	if (m_entity && m_gtaId
+		&& !m_bTimedModel
+		&& m_byteMoving == 0
+		&& m_AttachedVehicleID == INVALID_VEHICLE_ID
+		&& m_AttachedObjectID == INVALID_OBJECT_ID
+		&& m_AttachedPlayerID == INVALID_PLAYER_ID
+		&& !m_bUVAnimEnabled
+		&& m_entity->m_pRwObject != nullptr
+		&& m_pUVAnimRwObject == m_entity->m_pRwObject
+		&& (!m_bForceRender || m_bOobColSettled)) {
+		return;
+	}
+
 	if (!m_entity || !m_gtaId || GamePool_Object_GetAt(m_gtaId) != reinterpret_cast<sa::CObject*>(m_entity) || IsEntityPlaceable(m_entity)) {
 		return;
 	}
@@ -739,6 +754,12 @@ void CObject::UpdateMatrix(RwMatrix matrix)
 {
 	if (!m_entity || !m_entity->m_matrix) {
 		return;
+	}
+	const bool prevForceRender = m_bForceRender;
+	m_bForceRender = (matrix.pos.x > 3000.0f || matrix.pos.x < -3000.0f
+		|| matrix.pos.y > 3000.0f || matrix.pos.y < -3000.0f);
+	if (m_bForceRender && !prevForceRender) {
+		m_bOobColSettled = false;
 	}
 	if (m_bTimedHidden) {
 		m_entity->SetMatrix(matrix);

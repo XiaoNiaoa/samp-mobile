@@ -117,7 +117,7 @@ void CTextDraw::LoadTexture()
 		strncpy(rawTextureName, texturename, sizeof(rawTextureName) - 1);
 		rawTextureName[sizeof(rawTextureName) - 1] = '\0';
 
-		spdlog::info("LOADTEXTURE: txdname: {}, texture: {}", txdname, texturename);
+		spdlog::debug("LOADTEXTURE: txdname: {}, texture: {}", txdname, texturename);
 
 		if (!strcasecmp(txdname, "ld_shtr") && !strcasecmp(texturename, "ship")) {
 			strcpy(texturename, "ship_ld_shtr");

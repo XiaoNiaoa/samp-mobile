@@ -36,6 +36,7 @@ constexpr uint32_t kRpc185WatchdogMs = 12000u;
 constexpr uint32_t kVwUnfreezeDelayMs = 800u;
 constexpr uint32_t kManifestSettleIdleMs = 600u;
 constexpr uint32_t kSnapshotRebuildIntervalMs = 100u;
+constexpr uint32_t kIdleModelSweepIntervalMs = 3000u;
 
 inline uint32_t nonZeroTickMs() noexcept
 {
@@ -468,6 +469,7 @@ void ArtworkManager::onSessionStart(const std::string& serverHost, uint16_t serv
 	m_pendingHostRefresh = false;
 	m_lastSnapshotRevision = 0;
 	m_lastSnapshotPublishMs = 0;
+	m_lastIdleSweepMs = 0;
 	m_lastPublishedGateActive = false;
 
 	ensureCacheDirectories();
@@ -500,6 +502,7 @@ void ArtworkManager::onGameModeRestart()
 	m_pendingHostRefresh = false;
 	m_lastSnapshotRevision = 0;
 	m_lastSnapshotPublishMs = 0;
+	m_lastIdleSweepMs = 0;
 	m_lastPublishedGateActive = false;
 	spdlog::info("Artwork: cleaned up for GMX / restart");
 }
@@ -529,6 +532,7 @@ void ArtworkManager::onSessionEnd()
 	m_pendingHostRefresh = false;
 	m_lastSnapshotRevision = 0;
 	m_lastSnapshotPublishMs = 0;
+	m_lastIdleSweepMs = 0;
 	m_lastPublishedGateActive = false;
 }
 
@@ -904,6 +908,10 @@ void ArtworkManager::processFrame(NetGame* netGame)
 			DownloadProgressSnapshot emptySnap{};
 			std::lock_guard<std::mutex> lock(m_eventMutex);
 			m_cachedSnapshot = std::move(emptySnap);
+		}
+		if (m_lastIdleSweepMs == 0u || (nowTick - m_lastIdleSweepMs) >= kIdleModelSweepIntervalMs) {
+			m_lastIdleSweepMs = nowTick;
+			m_store.evictIdlePeriodic(m_manifest, nowTick);
 		}
 	} else {
 		const bool justActivated = !m_lastPublishedGateActive;

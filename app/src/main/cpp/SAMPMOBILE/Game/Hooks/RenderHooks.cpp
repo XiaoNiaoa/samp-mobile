@@ -126,6 +126,7 @@ namespace {
 
 struct ManualObjectRenderEntry {
 	CObject* obj;
+	sa::CBaseModelInfo* modelInfo;
 	float distSq;
 };
 
@@ -176,12 +177,59 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	}
 	sa::CCamera* pEngineCam = &sa::getTheCamera();
 
-	// PC SA-MP CObject::Draw (g_objectRenderDistanceThreshold = 600.0f): only run expensive
-	// CObject::PreRender (dynamic lighting/shadows/2dEffects) within 600m; distant horizon/LOD
-	// chunks render directly via RenderOneNonRoad.
-	constexpr float kFullPreRenderDistSq = 600.0f * 600.0f;
+	// Full CObject::PreRender + CObject::SetupLighting (dynamic point lights, scorch/burn,
+	// col-lighting) is only perceptible within GTA:SA's native ~300m non-LOD range. Beyond 300m
+	// (e.g. 600m-9999m custom map/LOD chunks), dispatch RpAtomic/RpClump directly like PC SA-MP
+	// CObject::Draw -> GameRwRenderObject, avoiding hundreds of per-frame CPointLights scans and
+	// GLES directional-light shader uniform state flips.
+	constexpr float kFullPreRenderDistSq = 300.0f * 300.0f;
 
-	auto renderManualObject = [](CObject *obj, float distSq) {
+	auto renderRwObjectDirect = [](CObject *obj, sa::CPhysical *entity, sa::CBaseModelInfo *modelInfo) {
+		RwObject *rwObj = entity ? entity->m_pRwObject : nullptr;
+		if (!rwObj)
+		{
+			return;
+		}
+		g_lastObjectModel.store(entity->m_nModelIndex, std::memory_order_relaxed);
+
+		CObject *matObj = nullptr;
+		if (obj->m_bHasCustomObjectMaterial)
+		{
+			obj->TryChangeToCustomObjectMaterial();
+			matObj = obj;
+		}
+
+		// Match PC SA-MP CObject::Draw (object.cpp:1191-1194): model flags bit 6 (0x40) = cull backfaces.
+		const uintptr_t cullMode = (modelInfo && (modelInfo->m_flags & 0x40u) != 0u)
+			? static_cast<uintptr_t>(rwCULLMODECULLBACK)
+			: static_cast<uintptr_t>(rwCULLMODECULLNONE);
+		RwRenderStateSet(rwRENDERSTATECULLMODE, reinterpret_cast<void *>(cullMode));
+
+		const uint8_t rwType = *reinterpret_cast<const uint8_t *>(rwObj);
+		if (rwType == 1 /* rpATOMIC */)
+		{
+			constexpr size_t kAtomicRenderCbOff = VER_x32 ? 0x48u : 0x70u;
+			using AtomicRenderFn = RpAtomic *(*)(RpAtomic *);
+			auto *atomic = reinterpret_cast<RpAtomic *>(rwObj);
+			auto fn = *reinterpret_cast<AtomicRenderFn const *>(reinterpret_cast<const uint8_t *>(atomic) + kAtomicRenderCbOff);
+			if (fn)
+			{
+				fn(atomic);
+			}
+		}
+		else if (rwType == 2 /* rpCLUMP */)
+		{
+			eng::fn::RpClumpRender(reinterpret_cast<RpClump *>(rwObj));
+		}
+
+		g_lastObjectModel.store(-1, std::memory_order_relaxed);
+		if (matObj)
+		{
+			matObj->ChangeToOriginalObjectMaterial();
+		}
+	};
+
+	auto renderManualObject = [&renderRwObjectDirect](CObject *obj, sa::CBaseModelInfo *modelInfo, float distSq) {
 		if (obj->NeedsPerFrameMatrixSync())
 		{
 			obj->UpdateRwMatrixAndFrame();
@@ -192,7 +240,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		}
 		else if (obj->m_entity && obj->m_entity->m_pRwObject)
 		{
-			eng::fn::CRenderer_RenderOneNonRoad(obj->m_entity);
+			renderRwObjectDirect(obj, obj->m_entity, modelInfo);
 		}
 	};
 
@@ -246,8 +294,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 					nativeDist = scaled;
 				}
 			}
-			const float minFarDist = nativeDist * 0.9f;
-			if (distSq <= minFarDist * minFarDist)
+			if (distSq <= nativeDist * nativeDist)
 			{
 				continue;
 			}
@@ -286,11 +333,11 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 		const bool bDrawLast = pModelInfo && ((pModelInfo->m_flags >> 1) & 1);
 		if (bDrawLast && s_transparentObjectCount < MAX_OBJECTS)
 		{
-			s_transparentObjects[s_transparentObjectCount++] = {pObject, distSq};
+			s_transparentObjects[s_transparentObjectCount++] = {pObject, pModelInfo, distSq};
 			continue;
 		}
 
-		renderManualObject(pObject, distSq);
+		renderManualObject(pObject, pModelInfo, distSq);
 	}
 
 	if (s_transparentObjectCount > 1)
@@ -302,7 +349,7 @@ DECL_HOOK(void, CRenderer_RenderEverythingBarRoads)
 	}
 	for (int t = 0; t < s_transparentObjectCount; ++t)
 	{
-		renderManualObject(s_transparentObjects[t].obj, s_transparentObjects[t].distSq);
+		renderManualObject(s_transparentObjects[t].obj, s_transparentObjects[t].modelInfo, s_transparentObjects[t].distSq);
 	}
 }
 

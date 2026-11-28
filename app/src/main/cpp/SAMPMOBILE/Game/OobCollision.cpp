@@ -141,9 +141,16 @@ void LogOobColPin(int iModel, int iSlot)
 		iLoaded = (int) *reinterpret_cast<uint8_t*>(pDef + 40);
 	}
 	bool bInImg = eng::fn::CStreaming_IsObjectInCdImage( 25000 + iSlot);
-	spdlog::info("OOBCol: model={} pin slot={} ref={} loaded={} "
-			"range=[{},{}] inImg={}",
-			iModel, iSlot, iRef, iLoaded, iMin, iMax, (int) bInImg);
+	static std::unordered_set<int> s_loggedPinSlots;
+	if (s_loggedPinSlots.insert(iSlot).second) {
+		spdlog::info("OOBCol: model={} pin slot={} ref={} loaded={} "
+				"range=[{},{}] inImg={}",
+				iModel, iSlot, iRef, iLoaded, iMin, iMax, (int) bInImg);
+	} else {
+		spdlog::debug("OOBCol: model={} pin slot={} ref={} loaded={} "
+				"range=[{},{}] inImg={}",
+				iModel, iSlot, iRef, iLoaded, iMin, iMax, (int) bInImg);
+	}
 }
 
 /**

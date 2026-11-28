@@ -165,6 +165,7 @@ private:
 	bool m_pendingHostRefresh = false;
 	uint64_t m_lastSnapshotRevision = 0;
 	uint32_t m_lastSnapshotPublishMs = 0;
+	uint32_t m_lastIdleSweepMs = 0;
 	bool m_lastPublishedGateActive = false;
 
 	DiskCacheMap m_diskCacheIndex;

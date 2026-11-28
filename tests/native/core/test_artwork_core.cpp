@@ -848,6 +848,43 @@ static void testDffValidatorAndColExtraction()
 		auto res80 = validateAndPrepareDff(dff80.data(), dff80.size(), true);
 		CHECK(res80.ok);
 		CHECK(res80.sanitizedDff.empty());
+
+		// Mixed 2dfx chunk (merged LOD DFFs like lc_s1_11_guardpost_chunk2_1.dff):
+		// entry[0] = genuine 100B (20B hdr + 80B payload, size=0x50) +
+		// entry[1] = mis-stamped 96B (20B hdr + 76B payload, size=0x50 -> must become 0x4C).
+		std::vector<uint8_t> fxMixed;
+		pushLE32(fxMixed, 2u);
+		// entry 0: true 80B payload
+		pushF32(fxMixed, 8.5f); pushF32(fxMixed, 27.2f); pushF32(fxMixed, 11.8f);
+		pushLE32(fxMixed, 0u);
+		pushLE32(fxMixed, 0x50u);
+		fxMixed.insert(fxMixed.end(), 80u, 0x11u);
+		// entry 1: buggy 76B payload stamped 0x50
+		pushF32(fxMixed, 15.9f); pushF32(fxMixed, 33.2f); pushF32(fxMixed, 13.2f);
+		pushLE32(fxMixed, 0u);
+		pushLE32(fxMixed, 0x50u);
+		fxMixed.insert(fxMixed.end(), 76u, 0x22u);
+
+		auto fxMixedChunk = wrapChunk(0x0253F2F8u, fxMixed);
+		auto dffMixed = buildMinimalDff("torch_wall", 0x0253F2FFu, 0x334C4F43u, nullptr, &fxMixedChunk);
+		auto resMixed = validateAndPrepareDff(dffMixed.data(), dffMixed.size(), true);
+		CHECK(resMixed.ok);
+		CHECK(!resMixed.sanitizedDff.empty());
+		size_t fxMixedPos = 0;
+		for (size_t i = 0; i + 4 <= resMixed.sanitizedDff.size(); ++i) {
+			if (resMixed.sanitizedDff[i] == 0xF8u && resMixed.sanitizedDff[i + 1] == 0xF2u
+				&& resMixed.sanitizedDff[i + 2] == 0x53u && resMixed.sanitizedDff[i + 3] == 0x02u) {
+				fxMixedPos = i;
+				break;
+			}
+		}
+		CHECK(fxMixedPos > 0);
+		const size_t mixedPay = fxMixedPos + 12u;
+		CHECK_EQ(resMixed.sanitizedDff[mixedPay + 4u + 16u], 0x50u);         // entry 0 preserved!
+		CHECK_EQ(resMixed.sanitizedDff[mixedPay + 4u + 100u + 16u], 0x4Cu);  // entry 1 patched to 0x4C!
+		auto resMixedReval = validateAndPrepareDff(resMixed.sanitizedDff.data(), resMixed.sanitizedDff.size(), true);
+		CHECK(resMixedReval.ok);
+		CHECK(resMixedReval.sanitizedDff.empty());
 	}
 }
 
